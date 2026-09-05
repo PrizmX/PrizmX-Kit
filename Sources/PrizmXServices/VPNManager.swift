@@ -197,8 +197,10 @@ public final class VPNManager {
         if tunnelManager == nil { await loadManager() }
         guard let manager = tunnelManager else { throw VPNError.notConfigured }
 
+        var didConfigure = configText != nil
         if manager.protocolConfiguration == nil {
             try await configure(configText: Self.defaultDirectConfig)
+            didConfigure = true
         }
         reconnectTask?.cancel()
         reconnectTask = nil
@@ -206,10 +208,13 @@ public final class VPNManager {
         wantsConnection = true
 
         do {
-            try await manager.loadFromPreferences()
+            // configure() already saved+loaded this manager; only reload when
+            // it ran without one. Saves two NE preference IPC round trips.
+            if !didConfigure {
+                try await manager.loadFromPreferences()
+            }
             manager.isEnabled = true
             try await manager.saveToPreferences()
-            try await manager.loadFromPreferences()
             try manager.connection.startVPNTunnel()
             TunnelLog.write(.info, "vpn start requested")
             refreshStatus()
