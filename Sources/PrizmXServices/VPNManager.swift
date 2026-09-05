@@ -154,9 +154,14 @@ public final class VPNManager {
         _ = try ConfigAdapter.parse(rawString: configText)
         let configPath = try TunnelConfigStorage.write(configText: configText)
         // Resolve node hostnames in the app (system DNS / 114). The extension
-        // cannot: FakeDNS owns getaddrinfo there.
+        // cannot: FakeDNS owns getaddrinfo there. Like Clash/Surge this must
+        // NOT block startup — pins refresh in the background and land well
+        // before the extension's cold-spawn bootstrap reads them; a stale pin
+        // is healed by the extension's last-resort re-resolution at dial time.
         let capturedDNS = dnsServers ?? PhysicalDNSSnapshot.capture()
-        _ = await NodeAddressStore.refresh(configText: configText, nameservers: capturedDNS)
+        Task {
+            _ = await NodeAddressStore.refresh(configText: configText, nameservers: capturedDNS)
+        }
         TunnelLog.write(.info, "configure wrote \(configPath) bytes=\(configText.utf8.count) appDNS=\(capturedDNS)")
         var payload: [String: Any] = [
             TunnelProviderKeys.configPath: configPath,
