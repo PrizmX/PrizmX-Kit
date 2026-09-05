@@ -16,6 +16,10 @@ public enum NodePingMethod: Sendable, Hashable {
 /// Returns milliseconds, or `nil` on timeout / connect failure. Direct nodes
 /// are skipped (`nil`). This does not dial through the proxy handshake — it
 /// measures reachability of the outbound server itself.
+///
+/// Node domains are dialed via their pinned IPv4 (`NodeAddressStore`), never
+/// the system resolver: with TUN on, the system resolver is the tunnel's
+/// FakeDNS and would hand back unreachable fake IPs for proxy-routed names.
 public struct NodePinger: Sendable {
     public var timeout: Duration
     public var maxConcurrent: Int
@@ -28,7 +32,11 @@ public struct NodePinger: Sendable {
     /// Probes a single node. `nil` means timeout or unreachable.
     public func ping(_ node: OutboundNode, method: NodePingMethod = .tcp) async -> Double? {
         guard let server = node.probeEndpoint else { return nil }
-        return await measure(server: server, method: method)
+        return await measure(
+            server: Self.dialTarget(for: server, pins: NodeAddressStore.load()),
+            serverName: server.host.description,
+            method: method
+        )
     }
 
     /// Probes every node with a bounded worker pool and streams results live.
@@ -42,6 +50,7 @@ public struct NodePinger: Sendable {
 
         return await withTaskGroup(of: (String, Double?).self, returning: [String: Double?].self) { group in
             var iterator = nodes.makeIterator()
+            let pins = NodeAddressStore.load()
             var inFlight = 0
             var results: [String: Double?] = [:]
             results.reserveCapacity(nodes.count)
@@ -50,7 +59,14 @@ public struct NodePinger: Sendable {
                 while inFlight < maxConcurrent, !Task.isCancelled, let node = iterator.next() {
                     inFlight += 1
                     group.addTask(priority: .utility) {
-                        let rtt = await self.ping(node, method: method)
+                        var rtt: Double?
+                        if let server = node.probeEndpoint {
+                            rtt = await self.measure(
+                                server: Self.dialTarget(for: server, pins: pins),
+                                serverName: server.host.description,
+                                method: method
+                            )
+                        }
                         return (node.id, rtt)
                     }
                 }
@@ -73,9 +89,22 @@ public struct NodePinger: Sendable {
         }
     }
 
+    // MARK: - Pin lookup
+
+    /// Pinned-IP dial target for a domain endpoint; IP literals and unpinned
+    /// domains pass through unchanged.
+    public static func dialTarget(
+        for endpoint: Endpoint,
+        pins: [String: [PrizmXProtocols.IPv4Address]]
+    ) -> Endpoint {
+        guard case .domain(let name) = endpoint.host,
+              let pinned = pins[name.lowercased()]?.first else { return endpoint }
+        return Endpoint(host: .ipv4(pinned), port: endpoint.port)
+    }
+
     // MARK: - Transport
 
-    private func measure(server: Endpoint, method: NodePingMethod) async -> Double? {
+    private func measure(server: Endpoint, serverName: String, method: NodePingMethod) async -> Double? {
         guard let nwEndpoint = Self.makeNWEndpoint(server) else { return nil }
 
         let parameters = NWParameters.tcp
@@ -98,7 +127,7 @@ public struct NodePinger: Sendable {
             connection.cancel()
             return Self.milliseconds(from: start)
         case .http(let path):
-            let ok = await sendHEAD(connection, host: server.host.description, path: path)
+            let ok = await sendHEAD(connection, host: serverName, path: path)
             connection.cancel()
             return ok ? Self.milliseconds(from: start) : nil
         }

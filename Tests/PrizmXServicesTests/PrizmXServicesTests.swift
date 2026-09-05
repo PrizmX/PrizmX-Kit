@@ -148,3 +148,20 @@ func externalStartIsAdoptedWithoutStop() {
     vpn.applyVPNStatus(.connected)
     #expect(events == [true])
 }
+
+@Test
+func nodePingerDialsPinnedIPForDomainNodes() {
+    let domain = Endpoint(domain: "Node.Example.sbs", port: 5868)
+    let pinned = PrizmXProtocols.IPv4Address(203, 0, 113, 7)
+    let target = NodePinger.dialTarget(
+        for: domain,
+        pins: ["node.example.sbs": [pinned]]
+    )
+    #expect(target.host == .ipv4(pinned))
+    #expect(target.port == 5868)
+
+    // Unpinned domains and IP literals pass through unchanged.
+    #expect(NodePinger.dialTarget(for: domain, pins: [:]) == domain)
+    let literal = Endpoint(host: .ipv4(PrizmXProtocols.IPv4Address(192, 0, 2, 1)), port: 443)
+    #expect(NodePinger.dialTarget(for: literal, pins: ["192.0.2.1": [pinned]]) == literal)
+}
