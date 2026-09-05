@@ -27,7 +27,7 @@ public struct NodePinger: Sendable {
 
     /// Probes a single node. `nil` means timeout or unreachable.
     public func ping(_ node: OutboundNode, method: NodePingMethod = .tcp) async -> Double? {
-        guard let server = node.probeServer else { return nil }
+        guard let server = node.probeEndpoint else { return nil }
         return await measure(server: server, method: method)
     }
 

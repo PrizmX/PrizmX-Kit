@@ -3,3 +3,4 @@
 @_exported import PrizmXConfig
 @_exported import PrizmXNodes
 @_exported import PrizmXProtocols
+@_exported import PrizmXRules

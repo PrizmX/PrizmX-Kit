@@ -44,10 +44,6 @@ public final class DashboardViewModel {
         ByteRateFormatter.string(fromBytesPerSecond: vpn.downloadBytesPerSecond)
     }
 
-    /// Backwards-compatible aliases.
-    public var formattedUploadSpeed: String { uploadSpeedString }
-    public var formattedDownloadSpeed: String { downloadSpeedString }
-
     public var activeProfileName: String {
         profiles.activeProfileName ?? "No Profile"
     }
@@ -86,8 +82,21 @@ public final class DashboardViewModel {
         if let manager = profiles.nodeManager, let groupName {
             try? manager.select(nodeID: node.id, inGroup: groupName)
         }
+        if let groupName {
+            profiles.setPolicySelection(node.id, inGroup: groupName)
+        }
         Task {
             await vpn.notifySelectedNode(id: node.id, groupName: groupName)
+        }
+    }
+
+    /// Policies: persist `group → member` (node, nested group, or DIRECT).
+    public func selectPolicyMember(_ memberID: String, inGroup groupName: String) {
+        try? profiles.setSelectedNode(id: memberID, groupName: groupName)
+        try? profiles.nodeManager?.select(nodeID: memberID, inGroup: groupName)
+        profiles.setPolicySelection(memberID, inGroup: groupName)
+        Task {
+            await vpn.notifySelectedNode(id: memberID, groupName: groupName)
         }
     }
 

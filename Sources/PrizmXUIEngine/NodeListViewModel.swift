@@ -16,6 +16,33 @@ public struct NodeSection: Identifiable, Sendable, Hashable {
     }
 }
 
+/// One `select` group member: a node, nested group, or built-in DIRECT/REJECT.
+public struct PolicyMember: Identifiable, Sendable, Hashable {
+    public var id: String
+    public var name: String
+    public var kindLabel: String
+    public var node: OutboundNode?
+
+    public init(id: String, name: String, kindLabel: String, node: OutboundNode? = nil) {
+        self.id = id
+        self.name = name
+        self.kindLabel = kindLabel
+        self.node = node
+    }
+}
+
+public struct PolicyGroupSection: Identifiable, Sendable, Hashable {
+    public var id: String
+    public var title: String
+    public var members: [PolicyMember]
+
+    public init(id: String, title: String, members: [PolicyMember]) {
+        self.id = id
+        self.title = title
+        self.members = members
+    }
+}
+
 /// Node tree / group list with search filtering and concurrent delay tests.
 @MainActor
 @Observable
@@ -44,6 +71,48 @@ public final class NodeListViewModel {
 
     public var selectedNodeID: String? {
         profiles.activeProfile?.selectedNodeID
+    }
+
+    /// Currently chosen member (node, nested group, or DIRECT) in `groupName`.
+    /// Reads the persisted Policies selection, then the catalog default.
+    public func selectedMemberID(inGroup groupName: String) -> String? {
+        if let persisted = profiles.policySelections()[groupName] { return persisted }
+        return profiles.nodeManager?.selectedMemberID(inGroup: groupName)
+    }
+
+    /// Policy groups with every member (nodes, nested groups, DIRECT).
+    public var policyGroupSections: [PolicyGroupSection] {
+        guard let manager = profiles.nodeManager else { return [] }
+        let groups = manager.groupsByName.values.sorted {
+            $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+        let namedGroups = groups.filter { group in
+            !(group.nodeIDs.count == 1 && group.name == group.nodeIDs[0])
+        }
+        return namedGroups.map { group in
+            PolicyGroupSection(
+                id: group.name,
+                title: group.name,
+                members: group.nodeIDs.map { Self.policyMember($0, manager: manager) }
+            )
+        }
+    }
+
+    private static func policyMember(_ id: String, manager: NodeManager) -> PolicyMember {
+        if let node = manager.nodesByID[id] {
+            return PolicyMember(id: id, name: node.name, kindLabel: "Node", node: node)
+        }
+        if manager.groupsByName[id] != nil {
+            return PolicyMember(id: id, name: id, kindLabel: "Group")
+        }
+        switch id.uppercased() {
+        case "DIRECT":
+            return PolicyMember(id: id, name: id, kindLabel: "DIRECT")
+        case "REJECT", "REJECT-DROP":
+            return PolicyMember(id: id, name: id, kindLabel: "REJECT")
+        default:
+            return PolicyMember(id: id, name: id, kindLabel: "Policy")
+        }
     }
 
     /// Grouped nodes after search filtering.
@@ -195,34 +264,10 @@ public final class NodeListViewModel {
             latencyByNodeID.removeValue(forKey: node.id)
         }
 
-        let pinger = self.pinger
-        let maxConcurrent = pinger.maxConcurrent
-        await withTaskGroup(of: (String, Double?).self) { group in
-            var iterator = nodes.makeIterator()
-            var inFlight = 0
-
-            func enqueue() {
-                while inFlight < maxConcurrent, !Task.isCancelled, let node = iterator.next() {
-                    inFlight += 1
-                    group.addTask(priority: .utility) {
-                        let rtt = await pinger.ping(node, method: method)
-                        return (node.id, rtt)
-                    }
-                }
-            }
-
-            enqueue()
-            for await item in group {
-                inFlight -= 1
-                await MainActor.run {
-                    self.latencyByNodeID[item.0] = item.1
-                }
-                if Task.isCancelled {
-                    group.cancelAll()
-                    break
-                }
-                enqueue()
-            }
+        // Bounded worker pool lives in NodePinger; results stream back on the
+        // main actor as each probe lands.
+        await pinger.pingAll(nodes, method: method) { nodeID, rtt in
+            self.latencyByNodeID[nodeID] = rtt
         }
     }
 }

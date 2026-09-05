@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import PrizmXConfig
 import PrizmXNodes
+import PrizmXRules
 
 /// Persist Clash / sing-box profiles in the App Group container and refresh
 /// subscription URLs. Parsing is delegated to `ConfigAdapter` in Foundation.
@@ -37,6 +38,7 @@ public final class ProfileStore {
     public private(set) var profiles: [ProxyProfile] = []
     public private(set) var activeProfileID: UUID?
     public private(set) var nodeManager: NodeManager?
+    public private(set) var rules: [RouteRule] = []
     public private(set) var lastError: String?
 
     public var activeProfile: ProxyProfile? {
@@ -51,6 +53,14 @@ public final class ProfileStore {
     public var activeNodeName: String? {
         guard let id = activeProfile?.selectedNodeID else { return nil }
         return nodeManager?.node(id: id)?.name
+    }
+
+    /// On-disk folder for index.json and config files.
+    public var directoryURL: URL { rootURL }
+
+    /// Config file for a profile (`configs/<uuid>.conf`).
+    public func fileURL(for id: UUID) -> URL {
+        configsURL.appendingPathComponent("\(id.uuidString).conf", isDirectory: false)
     }
 
     @ObservationIgnored
@@ -101,6 +111,16 @@ public final class ProfileStore {
         try? fileManager.removeItem(at: configURL(for: id))
     }
 
+    public func rename(id: UUID, to name: String) throws {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        guard let index = profiles.firstIndex(where: { $0.id == id }) else {
+            throw ProfileStoreError.unknownProfile
+        }
+        profiles[index].name = trimmed
+        try persist()
+    }
+
     public func selectActiveProfile(id: UUID) throws {
         guard profiles.contains(where: { $0.id == id }) else {
             throw ProfileStoreError.unknownProfile
@@ -108,6 +128,14 @@ public final class ProfileStore {
         activeProfileID = id
         try persist()
         rebuildCatalogIfNeeded()
+    }
+
+    public func policySelections() -> [String: String] {
+        PolicySelectionStore.load()
+    }
+
+    public func setPolicySelection(_ memberID: String, inGroup groupName: String) {
+        PolicySelectionStore.set(memberID, inGroup: groupName)
     }
 
     public func setSelectedNode(id nodeID: String, groupName: String? = nil) throws {
@@ -160,14 +188,18 @@ public final class ProfileStore {
     private func rebuildCatalogIfNeeded() {
         guard let raw = activeProfile?.rawConfig, !raw.isEmpty else {
             nodeManager = nil
+            rules = []
             return
         }
         do {
             let parsed = try ConfigAdapter.parse(rawString: raw)
+            rules = parsed.0.rules
+            parsed.1.applySelections(PolicySelectionStore.load())
             nodeManager = parsed.1
             lastError = nil
         } catch {
             nodeManager = nil
+            rules = []
             lastError = error.localizedDescription
         }
     }
@@ -180,6 +212,7 @@ public final class ProfileStore {
             profiles = []
             activeProfileID = nil
             nodeManager = nil
+            rules = []
             return
         }
 
@@ -266,21 +299,19 @@ public final class ProfileStore {
     }
 
     /// Accepts plain YAML/JSON or a base64-wrapped subscription body.
-    static func decodeSubscriptionBody(_ data: Data) -> String? {
-        if let text = String(data: data, encoding: .utf8) {
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if looksLikeConfig(trimmed) { return trimmed }
-            let compact = trimmed.replacingOccurrences(of: "\n", with: "")
-            if let decoded = Data(base64Encoded: compact),
-               let inner = String(data: decoded, encoding: .utf8) {
-                return inner.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            if !trimmed.isEmpty { return trimmed }
+    /// Anything else (error pages, HTML) returns nil instead of being saved.
+    public static func decodeSubscriptionBody(_ data: Data) -> String? {
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if looksLikeConfig(trimmed) { return trimmed }
+        let compact = trimmed.replacingOccurrences(of: "\n", with: "")
+        guard let decoded = Data(base64Encoded: compact),
+              let inner = String(data: decoded, encoding: .utf8) else {
+            return nil
         }
-        if let inner = String(data: data, encoding: .utf8) {
-            return inner
-        }
-        return nil
+        let innerTrimmed = inner.trimmingCharacters(in: .whitespacesAndNewlines)
+        return looksLikeConfig(innerTrimmed) ? innerTrimmed : nil
     }
 
     private static func looksLikeConfig(_ text: String) -> Bool {
@@ -293,10 +324,20 @@ public final class ProfileStore {
     }
 }
 
-public enum ProfileStoreError: Error, Sendable, Equatable {
+public enum ProfileStoreError: Error, Sendable, Equatable, LocalizedError {
     case unknownProfile
     case noActiveProfile
     case missingSubscriptionURL
     case unreadableSubscription
     case subscriptionFailed(Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .unknownProfile: "The profile no longer exists."
+        case .noActiveProfile: "No profile is active."
+        case .missingSubscriptionURL: "This profile has no subscription URL."
+        case .unreadableSubscription: "The download did not contain a readable profile."
+        case .subscriptionFailed(let code): "Subscription download failed (HTTP \(code))."
+        }
+    }
 }

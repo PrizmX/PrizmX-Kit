@@ -2,6 +2,7 @@ import Foundation
 import NetworkExtension
 import Observation
 import PrizmXConfig
+import PrizmXProtocols
 
 /// Observable bridge to `NEPacketTunnelProvider`.
 ///
@@ -55,6 +56,20 @@ public final class VPNManager {
     nonisolated(unsafe) private var statusObserver: NSObjectProtocol?
     @ObservationIgnored
     nonisolated(unsafe) private var metricsTask: Task<Void, Never>?
+    /// Follows external state changes (System Settings VPN toggle): true when
+    /// the tunnel came up outside the app, false when the user turned it off.
+    /// Lets the UI sync its TUN intent instead of fighting the system.
+    public var onExternalStateChange: (@MainActor (Bool) -> Void)?
+
+    /// User intent: startVPN sets it, stopVPN clears it. A disconnect without
+    /// stopVPN means the system killed the plugin (rebuild, update, reclaim)
+    /// or the user turned the VPN off from System Settings.
+    @ObservationIgnored
+    private var wantsConnection = false
+    @ObservationIgnored
+    private var reconnectAttempts = 0
+    @ObservationIgnored
+    private var reconnectTask: Task<Void, Never>?
     @ObservationIgnored
     private var mockUplinkBytes: UInt64 = 0
     @ObservationIgnored
@@ -74,10 +89,10 @@ public final class VPNManager {
             forName: .NEVPNStatusDidChange,
             object: nil,
             queue: .main
-        ) { [weak self] notification in
-            let vpnStatus = (notification.object as? NEVPNConnection)?.status ?? .invalid
+        ) { [weak self] _ in
             Task { @MainActor in
-                self?.applyVPNStatus(vpnStatus)
+                guard let self, let connection = self.tunnelManager?.connection else { return }
+                self.applyVPNStatus(connection.status)
             }
         }
         Task { await loadManager() }
@@ -88,6 +103,7 @@ public final class VPNManager {
             NotificationCenter.default.removeObserver(statusObserver)
         }
         metricsTask?.cancel()
+        reconnectTask?.cancel()
     }
 
     // MARK: - Preferences
@@ -128,13 +144,23 @@ public final class VPNManager {
         proto.providerBundleIdentifier = configuration.providerBundleIdentifier
         proto.serverAddress = configuration.serverAddress
 
+        // Config lives in the App Group; the NE profile only stores its path
+        // (profiles are limited to 512 KB). Validate first so a bad config
+        // (e.g. a subscription error page) never reaches the tunnel.
+        _ = try ConfigAdapter.parse(rawString: configText)
+        let configPath = try TunnelConfigStorage.write(configText: configText)
+        // Resolve node hostnames in the app (system DNS / 114). The extension
+        // cannot: FakeDNS owns getaddrinfo there.
+        let capturedDNS = dnsServers ?? PhysicalDNSSnapshot.capture()
+        _ = await NodeAddressStore.refresh(configText: configText, nameservers: capturedDNS)
+        TunnelLog.write(.info, "configure wrote \(configPath) bytes=\(configText.utf8.count) appDNS=\(capturedDNS)")
         var payload: [String: Any] = [
-            TunnelProviderKeys.configText: configText,
-            TunnelProviderKeys.fakeIP: fakeIP
+            TunnelProviderKeys.configPath: configPath,
+            TunnelProviderKeys.fakeIP: fakeIP,
+            TunnelProviderKeys.dnsServers: capturedDNS
         ]
         if let geoIPPath { payload[TunnelProviderKeys.geoIPPath] = geoIPPath }
         if let geositeJSON { payload[TunnelProviderKeys.geositeJSON] = geositeJSON }
-        if let dnsServers { payload[TunnelProviderKeys.dnsServers] = dnsServers }
         proto.providerConfiguration = payload
 
         manager.localizedDescription = configuration.localizedDescription
@@ -170,6 +196,10 @@ public final class VPNManager {
         if manager.protocolConfiguration == nil {
             try await configure(configText: Self.defaultDirectConfig)
         }
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        TunnelLifecycleStore.clearStop()
+        wantsConnection = true
 
         do {
             try await manager.loadFromPreferences()
@@ -177,9 +207,11 @@ public final class VPNManager {
             try await manager.saveToPreferences()
             try await manager.loadFromPreferences()
             try manager.connection.startVPNTunnel()
+            TunnelLog.write(.info, "vpn start requested")
             refreshStatus()
             startMetricsLoop()
         } catch {
+            TunnelLog.write(.error, "vpn start failed: \(error.localizedDescription)")
             lastError = error.localizedDescription
             status = .error
             throw VPNError.startFailed(error.localizedDescription)
@@ -187,8 +219,13 @@ public final class VPNManager {
     }
 
     public func stopVPN() {
+        wantsConnection = false
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectAttempts = 0
         if !isMock {
             tunnelManager?.connection.stopVPNTunnel()
+            TunnelLog.write(.info, "vpn stop requested")
         }
         stopMetricsLoop()
         resetThroughput()
@@ -264,15 +301,79 @@ public final class VPNManager {
 
 extension VPNManager {
     /// Reconnects the 1s metrics poll when NEVPN comes back to `.connected`,
-    /// and tears it down as soon as the session drops.
+    /// and tears it down as soon as the session drops. When the session dies
+    /// without `stopVPN`, fetch the stop reason first: `.userInitiated` (the
+    /// Settings toggle) must win over auto-reconnect; a killed plugin restarts.
     fileprivate func applyVPNStatus(_ vpnStatus: NEVPNStatus) {
         let next = VPNStatus(vpnStatus)
+        let previous = status
         status = next
         if next == .connected {
+            reconnectAttempts = 0
+            if !wantsConnection {
+                // Started from System Settings or another client — adopt it.
+                wantsConnection = true
+                onExternalStateChange?(true)
+            }
             startMetricsLoop()
         } else if next == .disconnected || next == .invalid || next == .error {
             stopMetricsLoop()
             resetThroughput()
+            // Only a drop *from* an active session is unexpected. A start
+            // while already disconnected must not read a stale user-stop.
+            let droppedWhileUp = previous == .connected
+                || previous == .connecting
+                || previous == .reconnecting
+                || previous == .disconnecting
+            if wantsConnection, droppedWhileUp {
+                handleExternalDisconnect()
+            }
+        }
+    }
+
+    private func handleExternalDisconnect() {
+        guard reconnectTask == nil else { return }
+        reconnectTask = Task { [weak self] in
+            guard let self else { return }
+            // Give the dying extension a beat to record its stop reason.
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            let userStopped = TunnelLifecycleStore.stopWasUserInitiated()
+            self.reconnectTask = nil
+            guard self.wantsConnection else { return }
+            if userStopped {
+                TunnelLog.write(.info, "vpn stopped by user; not reconnecting")
+                self.wantsConnection = false
+                self.reconnectAttempts = 0
+                self.onExternalStateChange?(false)
+            } else {
+                self.scheduleReconnect()
+            }
+        }
+    }
+
+    private func scheduleReconnect() {
+        guard reconnectTask == nil else { return }
+        let delays: [Duration] = [.seconds(1), .seconds(3), .seconds(8)]
+        guard reconnectAttempts < delays.count else {
+            if lastError == nil {
+                lastError = "Tunnel plugin stopped unexpectedly; toggle TUN to retry"
+            }
+            return
+        }
+        let delay = delays[reconnectAttempts]
+        reconnectAttempts += 1
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard let self, !Task.isCancelled else { return }
+            self.reconnectTask = nil
+            guard self.wantsConnection else { return }
+            TunnelLog.write(.info, "vpn auto-reconnect attempt \(self.reconnectAttempts)")
+            do {
+                try await self.startVPN()
+            } catch {
+                self.refreshStatus()
+            }
         }
     }
 

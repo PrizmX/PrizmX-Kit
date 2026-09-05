@@ -33,8 +33,10 @@ let package = Package(
             name: "PrizmXServices",
             dependencies: [
                 .product(name: "PrizmXConfig", package: "PrizmX-Foundation"),
+                .product(name: "PrizmXCore", package: "PrizmX-Foundation"),
                 .product(name: "PrizmXNodes", package: "PrizmX-Foundation"),
                 .product(name: "PrizmXProtocols", package: "PrizmX-Foundation"),
+                .product(name: "PrizmXRules", package: "PrizmX-Foundation"),
             ]
         ),
         .target(
@@ -43,7 +45,7 @@ let package = Package(
         ),
         .target(
             name: "PrizmXUIComponents",
-            dependencies: ["PrizmXUIEngine"]
+            dependencies: ["PrizmXUIEngine", "PrizmXServices"]
         ),
         .testTarget(
             name: "PrizmXServicesTests",
