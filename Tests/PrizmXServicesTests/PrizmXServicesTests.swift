@@ -118,3 +118,33 @@ func previewProfileParsesRegionalNodes() {
     #expect(store.nodeManager?.group(named: "Proxy") != nil)
     #expect(store.nodeManager?.group(named: "Direct") != nil)
 }
+
+@Test
+@MainActor
+func staleConnectedAfterStopIsNotAdopted() {
+    let vpn = VPNManager(isMock: true)
+    var events: [Bool] = []
+    vpn.onExternalStateChange = { events.append($0) }
+
+    vpn.stopVPN()
+    // A trailing `.connected` right after an explicit stop (queued NE
+    // notification) must not flip the intent back on.
+    vpn.applyVPNStatus(.connected)
+    #expect(events.isEmpty)
+
+    // A genuinely external start later (outside the grace window) is adopted.
+    vpn.applyVPNStatus(.disconnected)
+    vpn.applyVPNStatus(.connected)
+    // Still within grace of the same stop — nothing.
+    #expect(events.isEmpty)
+}
+
+@Test
+@MainActor
+func externalStartIsAdoptedWithoutStop() {
+    let vpn = VPNManager(isMock: true)
+    var events: [Bool] = []
+    vpn.onExternalStateChange = { events.append($0) }
+    vpn.applyVPNStatus(.connected)
+    #expect(events == [true])
+}

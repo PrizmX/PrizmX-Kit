@@ -70,6 +70,10 @@ public final class VPNManager {
     private var reconnectAttempts = 0
     @ObservationIgnored
     private var reconnectTask: Task<Void, Never>?
+    /// Set by `stopVPN`. A trailing stale `.connected` notification right
+    /// after an explicit stop must not be "adopted" as an external start.
+    @ObservationIgnored
+    private var lastStopRequestAt: Date?
     @ObservationIgnored
     private var mockUplinkBytes: UInt64 = 0
     @ObservationIgnored
@@ -220,6 +224,7 @@ public final class VPNManager {
 
     public func stopVPN() {
         wantsConnection = false
+        lastStopRequestAt = Date()
         reconnectTask?.cancel()
         reconnectTask = nil
         reconnectAttempts = 0
@@ -304,13 +309,19 @@ extension VPNManager {
     /// and tears it down as soon as the session drops. When the session dies
     /// without `stopVPN`, fetch the stop reason first: `.userInitiated` (the
     /// Settings toggle) must win over auto-reconnect; a killed plugin restarts.
-    fileprivate func applyVPNStatus(_ vpnStatus: NEVPNStatus) {
+    /// Internal (not fileprivate) so the mock path can drive it in tests.
+    func applyVPNStatus(_ vpnStatus: NEVPNStatus) {
         let next = VPNStatus(vpnStatus)
         let previous = status
         status = next
         if next == .connected {
             reconnectAttempts = 0
             if !wantsConnection {
+                // A stale `.connected` trailing our own stopVPN is not an
+                // external start — suppress it or the UI toggle flashes on.
+                if let lastStopRequestAt, Date().timeIntervalSince(lastStopRequestAt) < 2 {
+                    return
+                }
                 // Started from System Settings or another client — adopt it.
                 wantsConnection = true
                 onExternalStateChange?(true)
