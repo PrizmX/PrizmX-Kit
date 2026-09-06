@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import PrizmXConfig
 import PrizmXNodes
+import PrizmXProtocols
 import PrizmXRules
 
 /// Persist Clash / sing-box profiles in the App Group container and refresh
@@ -15,7 +16,7 @@ public final class ProfileStore {
         public var directoryName: String
 
         public init(
-            appGroupIdentifier: String = "group.app.prizmx",
+            appGroupIdentifier: String = PrizmXAppGroup.identifier,
             directoryName: String = "PrizmXKit"
         ) {
             self.appGroupIdentifier = appGroupIdentifier
