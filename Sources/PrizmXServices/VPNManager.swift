@@ -259,8 +259,7 @@ public final class VPNManager {
     // MARK: - IPC
 
     /// Asks the Packet Tunnel for a live throughput snapshot.
-    /// Returns `.zero` when the session is down or the provider has not
-    /// implemented `handleAppMessage` yet.
+    /// Returns `.zero` when the session is down or IPC fails.
     public func fetchMetrics() async -> VPNMetrics {
         if isMock {
             return status == .connected ? nextMockMetrics() : .zero

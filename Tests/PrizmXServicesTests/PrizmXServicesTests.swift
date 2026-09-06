@@ -44,18 +44,6 @@ func tunnelIPCRoundTripIncludesActiveConnections() throws {
     let encoded = try TunnelIPC.encode(TunnelIPC.Response.success(metrics: metrics))
     let decoded = try TunnelIPC.metrics(from: encoded)
     #expect(decoded == metrics)
-
-    let bare = try JSONEncoder().encode(metrics)
-    let fromBare = try TunnelIPC.metrics(from: bare)
-    #expect(fromBare.activeConnections == 9)
-}
-
-@Test
-func vpnMetricsDecodesLegacyPayloadWithoutConnections() throws {
-    let json = Data(#"{"uploadBytesPerSecond":1,"downloadBytesPerSecond":2,"uplinkBytes":3,"downlinkBytes":4}"#.utf8)
-    let metrics = try JSONDecoder().decode(VPNMetrics.self, from: json)
-    #expect(metrics.uploadBytesPerSecond == 1)
-    #expect(metrics.activeConnections == 0)
 }
 
 @Test

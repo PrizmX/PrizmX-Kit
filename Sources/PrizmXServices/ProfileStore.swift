@@ -12,7 +12,7 @@ import PrizmXRules
 public final class ProfileStore {
     public struct Configuration: Sendable, Equatable {
         public var appGroupIdentifier: String
-        /// Folder name inside the container (or Application Support fallback).
+        /// Folder name inside the App Group container.
         public var directoryName: String
 
         public init(
@@ -27,7 +27,7 @@ public final class ProfileStore {
     }
 
     public enum StorageKind: Sendable, Equatable {
-        /// App Group / Application Support persistence.
+        /// App Group persistence.
         case disk
         /// Preview and tests; never touches the file system.
         case memory
@@ -277,14 +277,12 @@ public final class ProfileStore {
     }
 
     private var rootURL: URL {
-        if let container = fileManager.containerURL(
+        guard let container = fileManager.containerURL(
             forSecurityApplicationGroupIdentifier: configuration.appGroupIdentifier
-        ) {
-            return container.appendingPathComponent(configuration.directoryName, isDirectory: true)
+        ) else {
+            preconditionFailure("App Group '\(configuration.appGroupIdentifier)' is unavailable")
         }
-        let support = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fileManager.temporaryDirectory
-        return support.appendingPathComponent(configuration.directoryName, isDirectory: true)
+        return container.appendingPathComponent(configuration.directoryName, isDirectory: true)
     }
 
     private var indexURL: URL {
