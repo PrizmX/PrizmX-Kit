@@ -2,6 +2,7 @@ import Foundation
 import NetworkExtension
 import Observation
 import PrizmXConfig
+import PrizmXCore
 import PrizmXProtocols
 
 /// Observable bridge to `NEPacketTunnelProvider`.
@@ -136,8 +137,11 @@ public final class VPNManager {
     public func configure(
         configText: String,
         fakeIP: Bool = true,
+        systemProxy: Bool = false,
+        allowLAN: Bool = false,
+        mixedPort: Int = TunnelProviderKeys.defaultMixedPort,
         geoIPPath: String? = nil,
-        geositeJSON: String? = nil,
+        geositePath: String? = nil,
         dnsServers: [String]? = nil
     ) async throws {
         guard !isMock else { return }
@@ -151,7 +155,10 @@ public final class VPNManager {
         // Config lives in the App Group; the NE profile only stores its path
         // (profiles are limited to 512 KB). Validate first so a bad config
         // (e.g. a subscription error page) never reaches the tunnel.
-        _ = try ConfigAdapter.parse(rawString: configText)
+        let (router, _) = try ConfigAdapter.parse(rawString: configText)
+        let needsGeoIP = router.rules.contains { if case .geoIP = $0.matcher { return true }; return false }
+        let needsGeosite = router.rules.contains { if case .geosite = $0.matcher { return true }; return false }
+        let assets = await GeoAssetStore.prepare(geoIP: needsGeoIP, geosite: needsGeosite)
         let configPath = try TunnelConfigStorage.write(configText: configText)
         // Resolve node hostnames in the app (system DNS / 114). The extension
         // cannot: FakeDNS owns getaddrinfo there. Like Clash/Surge this must
@@ -166,10 +173,17 @@ public final class VPNManager {
         var payload: [String: Any] = [
             TunnelProviderKeys.configPath: configPath,
             TunnelProviderKeys.fakeIP: fakeIP,
+            TunnelProviderKeys.systemProxy: systemProxy,
+            TunnelProviderKeys.allowLAN: allowLAN,
+            TunnelProviderKeys.mixedPort: mixedPort,
             TunnelProviderKeys.dnsServers: capturedDNS
         ]
-        if let geoIPPath { payload[TunnelProviderKeys.geoIPPath] = geoIPPath }
-        if let geositeJSON { payload[TunnelProviderKeys.geositeJSON] = geositeJSON }
+        if let path = geoIPPath ?? assets.geoIPPath {
+            payload[TunnelProviderKeys.geoIPPath] = path
+        }
+        if let path = geositePath ?? assets.geositePath {
+            payload[TunnelProviderKeys.geositePath] = path
+        }
         proto.providerConfiguration = payload
 
         manager.localizedDescription = configuration.localizedDescription
@@ -184,7 +198,12 @@ public final class VPNManager {
     // MARK: - Lifecycle
 
     /// Starts the Packet Tunnel. Pass `configText` to (re)install the profile first.
-    public func startVPN(configText: String? = nil) async throws {
+    public func startVPN(
+        configText: String? = nil,
+        fakeIP: Bool = true,
+        systemProxy: Bool = false,
+        allowLAN: Bool = false
+    ) async throws {
         lastError = nil
         if isMock {
             status = .connecting
@@ -197,20 +216,35 @@ public final class VPNManager {
         }
 
         if let configText {
-            try await configure(configText: configText)
+            try await configure(
+                configText: configText,
+                fakeIP: fakeIP,
+                systemProxy: systemProxy,
+                allowLAN: allowLAN
+            )
         }
         if tunnelManager == nil { await loadManager() }
         guard let manager = tunnelManager else { throw VPNError.notConfigured }
 
         var didConfigure = configText != nil
         if manager.protocolConfiguration == nil {
-            try await configure(configText: Self.defaultDirectConfig)
+            try await configure(
+                configText: Self.defaultDirectConfig,
+                fakeIP: fakeIP,
+                systemProxy: systemProxy,
+                allowLAN: allowLAN
+            )
             didConfigure = true
         }
         reconnectTask?.cancel()
         reconnectTask = nil
         TunnelLifecycleStore.clearStop()
         wantsConnection = true
+
+        if status == .connected {
+            await notifyCaptureMode(fakeIP: fakeIP, systemProxy: systemProxy, allowLAN: allowLAN)
+            return
+        }
 
         do {
             // configure() already saved+loaded this manager; only reload when
@@ -296,10 +330,55 @@ public final class VPNManager {
 
     /// Notifies a running tunnel that the selected outbound changed.
     public func notifySelectedNode(id nodeID: String, groupName: String?) async {
+        if !isMock, let groupName {
+            let mode = OutboundModeStore.load().mode
+            OutboundModeStore.save(mode: mode, globalGroup: groupName)
+        }
         guard !isMock, status == .connected else { return }
         guard let session = tunnelManager?.connection as? NETunnelProviderSession else { return }
         guard let payload = try? TunnelIPC.encode(
             .init(method: .selectNode, nodeID: nodeID, groupName: groupName)
+        ) else { return }
+        try? session.sendProviderMessage(payload) { _ in }
+    }
+
+    /// Rule / Global / Direct. No-op when the session is down; the next start
+    /// reads `OutboundModeStore`.
+    public func notifyOutboundMode(_ modeRawValue: String, globalGroup: String?) async {
+        guard let mode = OutboundMode(rawValue: modeRawValue) else { return }
+        guard !isMock else { return }
+        OutboundModeStore.save(mode: mode, globalGroup: globalGroup)
+        guard status == .connected else { return }
+        guard let session = tunnelManager?.connection as? NETunnelProviderSession else { return }
+        guard let payload = try? TunnelIPC.encode(
+            .init(method: .setOutboundMode, groupName: globalGroup, outboundMode: mode.rawValue)
+        ) else { return }
+        try? session.sendProviderMessage(payload) { _ in }
+    }
+
+    public func clearFlows() async {
+        if isMock {
+            var snapshot = lastMetrics
+            snapshot.recentFlows = []
+            lastMetrics = snapshot
+            return
+        }
+        guard status == .connected else { return }
+        guard let session = tunnelManager?.connection as? NETunnelProviderSession else { return }
+        guard let payload = try? TunnelIPC.encode(TunnelIPC.Request(method: .clearFlows)) else { return }
+        try? session.sendProviderMessage(payload) { _ in }
+    }
+
+    public func notifyCaptureMode(fakeIP: Bool, systemProxy: Bool, allowLAN: Bool = false) async {
+        guard !isMock, status == .connected else { return }
+        guard let session = tunnelManager?.connection as? NETunnelProviderSession else { return }
+        guard let payload = try? TunnelIPC.encode(
+            TunnelIPC.Request(
+                method: .setCaptureMode,
+                fakeIP: fakeIP,
+                systemProxy: systemProxy,
+                allowLAN: allowLAN
+            )
         ) else { return }
         try? session.sendProviderMessage(payload) { _ in }
     }

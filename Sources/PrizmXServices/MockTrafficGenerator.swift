@@ -1,4 +1,6 @@
 import Foundation
+import PrizmXCore
+import PrizmXProtocols
 
 /// Deterministic oscillating throughput used by `VPNManager(isMock:)` and Previews.
 ///
@@ -24,10 +26,22 @@ public enum MockTrafficGenerator: Sendable {
             phase: 0.6
         )
         let connections = Int((48.0 + 10.0 * sin(epoch * 0.35)).rounded())
+        let sample = FlowRecord(
+            startedAt: date.addingTimeInterval(-2),
+            endpoint: Endpoint(domain: "github.com", port: 443),
+            via: "Proxies",
+            uplinkBytes: 12_000,
+            downlinkBytes: 180_000,
+            milliseconds: 1_800,
+            clientEnd: "eof",
+            remoteEnd: "eof",
+            closed: true
+        )
         return VPNMetrics(
             uploadBytesPerSecond: upload,
             downloadBytesPerSecond: download,
-            activeConnections: max(8, connections)
+            activeConnections: max(8, connections),
+            recentFlows: [sample]
         )
     }
 
