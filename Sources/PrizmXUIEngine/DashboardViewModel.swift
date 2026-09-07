@@ -72,7 +72,7 @@ public final class DashboardViewModel {
             return
         }
         let config = profiles.activeProfile?.rawConfig ?? VPNManager.defaultDirectConfig
-        try? await vpn.startVPN(configText: config)
+        try? await vpn.startVPN(configText: config, overlay: profiles.overlay)
     }
 
     /// Persists the selected outbound and notifies a running Packet Tunnel.

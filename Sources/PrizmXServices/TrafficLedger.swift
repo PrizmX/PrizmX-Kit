@@ -17,8 +17,27 @@ public final class TrafficLedger {
         var policy: [String: UInt64] = [:]
         /// up+down per domain.
         var domain: [String: UInt64] = [:]
+        /// up+down per app accounting key.
+        var app: [String: UInt64] = [:]
+        var appNames: [String: String] = [:]
         /// Hour-of-day (0...23) → bytes.
         var hours: [Int: UInt64] = [:]
+
+        enum CodingKeys: String, CodingKey {
+            case totals, policy, domain, app, appNames, hours
+        }
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            totals = try container.decodeIfPresent(TrafficTotals.self, forKey: .totals) ?? TrafficTotals()
+            policy = try container.decodeIfPresent([String: UInt64].self, forKey: .policy) ?? [:]
+            domain = try container.decodeIfPresent([String: UInt64].self, forKey: .domain) ?? [:]
+            app = try container.decodeIfPresent([String: UInt64].self, forKey: .app) ?? [:]
+            appNames = try container.decodeIfPresent([String: String].self, forKey: .appNames) ?? [:]
+            hours = try container.decodeIfPresent([Int: UInt64].self, forKey: .hours) ?? [:]
+        }
     }
 
     private var days: [String: DayBucket]
@@ -46,26 +65,44 @@ public final class TrafficLedger {
         }
     }
 
-    /// Top rows for the Ranking card. `app` scope is empty on purpose: a
-    /// packet tunnel cannot attribute flows to processes.
+    /// Top rows for the Ranking card.
     public func rows(for scope: TrafficRankScope, now: Date = .now) -> [TrafficRankRow] {
-        guard scope != .app else { return [] }
         let bucket = days[Self.dayKey(now)] ?? DayBucket()
-        var source = scope == .domain ? bucket.domain : bucket.policy
-        if scope == .policy {
-            // Direct traffic bypasses the proxy plane; rank it as its own row.
+        var source: [String: UInt64]
+        switch scope {
+        case .app:
+            source = bucket.app
+        case .domain:
+            source = bucket.domain
+        case .policy:
+            source = bucket.policy
             let directTotal = bucket.totals.uploadDirect + bucket.totals.downloadDirect
             if directTotal > 0 { source["DIRECT"] = directTotal }
         }
         let sorted = source.sorted { $0.value > $1.value }.prefix(8)
         let peak = max(sorted.first?.value ?? 1, 1)
         return sorted.enumerated().map { index, entry in
-            TrafficRankRow(
+            let name: String
+            var bundleID: String?
+            var icon = "app.fill"
+            switch scope {
+            case .app:
+                name = bucket.appNames[entry.key] ?? entry.key
+                bundleID = entry.key.contains(".") ? entry.key : nil
+            case .domain:
+                name = entry.key
+                icon = "globe"
+            case .policy:
+                name = entry.key == "proxy" ? "Proxy" : entry.key
+                icon = Self.policyIcon(entry.key)
+            }
+            return TrafficRankRow(
                 id: "\(scope.rawValue)-\(index)",
-                name: scope == .policy && entry.key == "proxy" ? "Proxy" : entry.key,
+                name: name,
                 bytes: entry.value,
                 fraction: Double(entry.value) / Double(peak),
-                systemImage: scope == .domain ? "globe" : Self.policyIcon(entry.key)
+                systemImage: icon,
+                bundleID: bundleID
             )
         }
     }
@@ -95,6 +132,7 @@ public final class TrafficLedger {
         let directDownDelta = metrics.directDownlinkBytes - last.directDownlinkBytes
         let policyDeltas = Self.diff(metrics.policyBytes, minus: last.policyBytes)
         let domainDeltas = Self.diff(metrics.domainBytes, minus: last.domainBytes)
+        let appDeltas = Self.diff(metrics.appBytes, minus: last.appBytes)
         last = metrics
         guard uploadDelta > 0 || downloadDelta > 0 else { return }
 
@@ -119,6 +157,12 @@ public final class TrafficLedger {
         }
         for (domain, bytes) in domainDeltas {
             day.domain[domain, default: 0] &+= bytes
+        }
+        for (app, bytes) in appDeltas {
+            day.app[app, default: 0] &+= bytes
+        }
+        for (key, name) in metrics.appNames where day.appNames[key] == nil {
+            day.appNames[key] = name
         }
         day.hours[hour, default: 0] &+= uploadDelta + downloadDelta
 

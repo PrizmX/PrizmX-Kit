@@ -142,7 +142,8 @@ public final class VPNManager {
         mixedPort: Int = TunnelProviderKeys.defaultMixedPort,
         geoIPPath: String? = nil,
         geositePath: String? = nil,
-        dnsServers: [String]? = nil
+        dnsServers: [String]? = nil,
+        overlay: ProfileOverlay = .empty
     ) async throws {
         guard !isMock else { return }
         if tunnelManager == nil { await loadManager() }
@@ -155,11 +156,14 @@ public final class VPNManager {
         // Config lives in the App Group; the NE profile only stores its path
         // (profiles are limited to 512 KB). Validate first so a bad config
         // (e.g. a subscription error page) never reaches the tunnel.
-        let (router, _) = try ConfigAdapter.parse(rawString: configText)
+        let (router, _) = try ConfigAdapter.parse(rawString: configText, overlay: overlay)
         let needsGeoIP = router.rules.contains { if case .geoIP = $0.matcher { return true }; return false }
         let needsGeosite = router.rules.contains { if case .geosite = $0.matcher { return true }; return false }
         let assets = await GeoAssetStore.prepare(geoIP: needsGeoIP, geosite: needsGeosite)
         let configPath = try TunnelConfigStorage.write(configText: configText)
+        let overlayPath = overlay.isEmpty
+            ? nil
+            : try ProfileOverlayStore.write(overlay)
         // Resolve node hostnames in the app (system DNS / 114). The extension
         // cannot: FakeDNS owns getaddrinfo there. Like Clash/Surge this must
         // NOT block startup — pins refresh in the background and land well
@@ -184,6 +188,9 @@ public final class VPNManager {
         if let path = geositePath ?? assets.geositePath {
             payload[TunnelProviderKeys.geositePath] = path
         }
+        if let overlayPath {
+            payload[TunnelProviderKeys.overlayPath] = overlayPath
+        }
         proto.providerConfiguration = payload
 
         manager.localizedDescription = configuration.localizedDescription
@@ -202,7 +209,8 @@ public final class VPNManager {
         configText: String? = nil,
         fakeIP: Bool = true,
         systemProxy: Bool = false,
-        allowLAN: Bool = false
+        allowLAN: Bool = false,
+        overlay: ProfileOverlay = .empty
     ) async throws {
         lastError = nil
         if isMock {
@@ -220,7 +228,8 @@ public final class VPNManager {
                 configText: configText,
                 fakeIP: fakeIP,
                 systemProxy: systemProxy,
-                allowLAN: allowLAN
+                allowLAN: allowLAN,
+                overlay: overlay
             )
         }
         if tunnelManager == nil { await loadManager() }
@@ -232,7 +241,8 @@ public final class VPNManager {
                 configText: Self.defaultDirectConfig,
                 fakeIP: fakeIP,
                 systemProxy: systemProxy,
-                allowLAN: allowLAN
+                allowLAN: allowLAN,
+                overlay: overlay
             )
             didConfigure = true
         }

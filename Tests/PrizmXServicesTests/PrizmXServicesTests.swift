@@ -153,3 +153,23 @@ func nodePingerDialsPinnedIPForDomainNodes() {
     let literal = Endpoint(host: .ipv4(PrizmXProtocols.IPv4Address(192, 0, 2, 1)), port: 443)
     #expect(NodePinger.dialTarget(for: literal, pins: ["192.0.2.1": [pinned]]) == literal)
 }
+
+@MainActor
+@Test
+func profileOverlayMergesInFrontOfBodyRules() throws {
+    let store = ProfileStore(storage: .memory)
+    try store.upsert(
+        ProxyProfile(name: "Preview", rawConfig: PreviewFixtures.catalogYAML),
+        makeActive: true
+    )
+    let bodyCount = store.rules.count
+    try store.saveOverlay(
+        ProfileOverlay(rules: [
+            OverlayRule(type: .domainSuffix, payload: "corp.internal", policy: "DIRECT"),
+        ])
+    )
+    #expect(store.rules.count == bodyCount + 1)
+    #expect(store.rules.first?.displayPayload == "corp.internal")
+    #expect(store.rules.first?.displayPolicy == "DIRECT")
+    #expect(store.overlay.rules.count == 1)
+}

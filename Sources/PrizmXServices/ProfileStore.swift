@@ -40,7 +40,11 @@ public final class ProfileStore {
     public private(set) var activeProfileID: UUID?
     public private(set) var nodeManager: NodeManager?
     public private(set) var rules: [RouteRule] = []
+    /// Overlay owned by the active profile (empty when none).
+    public private(set) var overlay: ProfileOverlay = .empty
     public private(set) var lastError: String?
+    @ObservationIgnored
+    private var overlaysByID: [UUID: ProfileOverlay] = [:]
 
     public var activeProfile: ProxyProfile? {
         guard let activeProfileID else { return nil }
@@ -108,6 +112,10 @@ public final class ProfileStore {
             activeProfileID = profiles.first?.id
         }
         try persist()
+        overlaysByID[id] = nil
+        if storage == .disk {
+            try? fileManager.removeItem(at: overlayURL(for: id))
+        }
         rebuildCatalogIfNeeded()
         try? fileManager.removeItem(at: configURL(for: id))
     }
@@ -150,6 +158,28 @@ public final class ProfileStore {
         try persist()
     }
 
+    /// Replaces the overlay for `id` (default: active). Subscription refresh
+    /// does not touch this file.
+    public func saveOverlay(_ overlay: ProfileOverlay, for id: UUID? = nil) throws {
+        guard let profileID = id ?? activeProfileID else {
+            throw ProfileStoreError.noActiveProfile
+        }
+        guard profiles.contains(where: { $0.id == profileID }) else {
+            throw ProfileStoreError.unknownProfile
+        }
+        overlaysByID[profileID] = overlay
+        if storage == .disk {
+            try fileManager.createDirectory(at: overlaysURL, withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            try encoder.encode(overlay).write(to: overlayURL(for: profileID), options: .atomic)
+        }
+        if profileID == activeProfileID {
+            self.overlay = overlay
+            rebuildCatalogIfNeeded()
+        }
+    }
+
     /// Downloads a subscription URL and replaces that profile's raw config.
     public func refreshSubscription(id: UUID) async throws {
         guard let index = profiles.firstIndex(where: { $0.id == id }) else {
@@ -187,13 +217,15 @@ public final class ProfileStore {
     // MARK: - Private
 
     private func rebuildCatalogIfNeeded() {
-        guard let raw = activeProfile?.rawConfig, !raw.isEmpty else {
+        guard let active = activeProfile, !active.rawConfig.isEmpty else {
             nodeManager = nil
             rules = []
+            overlay = .empty
             return
         }
+        overlay = loadOverlay(for: active.id)
         do {
-            let parsed = try ConfigAdapter.parse(rawString: raw)
+            let parsed = try ConfigAdapter.parse(rawString: active.rawConfig, overlay: overlay)
             rules = parsed.0.rules
             parsed.1.applySelections(PolicySelectionStore.load())
             nodeManager = parsed.1
@@ -252,6 +284,7 @@ public final class ProfileStore {
         guard storage == .disk else { return }
         try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: configsURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: overlaysURL, withIntermediateDirectories: true)
 
         let records = profiles.map { profile in
             ProfileIndexRecord(
@@ -293,8 +326,28 @@ public final class ProfileStore {
         rootURL.appendingPathComponent("configs", isDirectory: true)
     }
 
+    private var overlaysURL: URL {
+        rootURL.appendingPathComponent("overlays", isDirectory: true)
+    }
+
     private func configURL(for id: UUID) -> URL {
         configsURL.appendingPathComponent("\(id.uuidString).conf", isDirectory: false)
+    }
+
+    private func overlayURL(for id: UUID) -> URL {
+        overlaysURL.appendingPathComponent("\(id.uuidString).json", isDirectory: false)
+    }
+
+    private func loadOverlay(for id: UUID) -> ProfileOverlay {
+        if let cached = overlaysByID[id] { return cached }
+        guard storage == .disk else { return .empty }
+        guard let data = try? Data(contentsOf: overlayURL(for: id)),
+              let overlay = try? JSONDecoder().decode(ProfileOverlay.self, from: data)
+        else {
+            return .empty
+        }
+        overlaysByID[id] = overlay
+        return overlay
     }
 
     /// Accepts plain YAML/JSON or a base64-wrapped subscription body.

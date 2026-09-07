@@ -33,7 +33,7 @@ public enum TrafficRankScope: String, CaseIterable, Identifiable, Sendable, Coda
 
     public var emptyDescription: String {
         switch self {
-        case .app: "A packet tunnel cannot see which process sent a flow."
+        case .app: "App totals appear after the packet tunnel attributes flows."
         case .domain: "Domain totals appear when requests are classified."
         case .policy: "Policy totals appear when rules match traffic."
         }
