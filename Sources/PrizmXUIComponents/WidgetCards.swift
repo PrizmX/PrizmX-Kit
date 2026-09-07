@@ -374,25 +374,22 @@ public struct OutboundCard<PickerContent: View>: View {
 
 // MARK: - Takeover
 
-/// Network takeover card: which pipes capture traffic (TUN; System Proxy later).
+/// Network takeover card: which pipes capture traffic.
+/// System Proxy → mixed-port in the main app; TUN → the Packet Tunnel.
 /// Distinct from the sidebar's Debug → Capture (HTTP recording).
 public struct TakeoverCard: View {
     public var headline: String
     public var proxyIsOn: Binding<Bool>
     public var tunIsOn: Binding<Bool>
-    /// System Proxy is not wired yet; show the row disabled as Coming soon.
-    public var systemProxyAvailable: Bool
 
     public init(
         headline: String,
         proxyIsOn: Binding<Bool>,
-        tunIsOn: Binding<Bool>,
-        systemProxyAvailable: Bool = false
+        tunIsOn: Binding<Bool>
     ) {
         self.headline = headline
         self.proxyIsOn = proxyIsOn
         self.tunIsOn = tunIsOn
-        self.systemProxyAvailable = systemProxyAvailable
     }
 
     public var body: some View {
@@ -408,10 +405,9 @@ public struct TakeoverCard: View {
                 VStack(spacing: 8) {
                     WidgetSwitchRow(
                         title: "System Proxy",
-                        subtitle: systemProxyAvailable ? "HTTP & HTTPS via macOS" : "Coming soon",
+                        subtitle: "HTTP & HTTPS via mixed-port",
                         systemImage: "globe",
-                        isOn: proxyIsOn,
-                        enabled: systemProxyAvailable
+                        isOn: proxyIsOn
                     )
                     Divider()
                     WidgetSwitchRow(
