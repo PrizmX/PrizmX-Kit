@@ -75,6 +75,9 @@ public final class VPNManager {
     /// after an explicit stop must not be "adopted" as an external start.
     @ObservationIgnored
     private var lastStopRequestAt: Date?
+    /// True while `startVPN` is waiting for NEVPN `.connected` — blocks reconnect.
+    @ObservationIgnored
+    private var startingTunnel = false
     @ObservationIgnored
     private var mockUplinkBytes: UInt64 = 0
     @ObservationIgnored
@@ -256,22 +259,44 @@ public final class VPNManager {
             return
         }
 
+        startingTunnel = true
+        defer { startingTunnel = false }
         do {
-            // configure() already saved+loaded this manager; only reload when
-            // it ran without one. Saves two NE preference IPC round trips.
             if !didConfigure {
                 try await manager.loadFromPreferences()
             }
             manager.isEnabled = true
             try await manager.saveToPreferences()
-            try manager.connection.startVPNTunnel()
-            TunnelLog.write(.info, "vpn start requested")
+            let session = try await Self.reloadSession(
+                matching: configuration.providerBundleIdentifier
+            )
+            tunnelManager = session.manager
+            guard session.manager.isEnabled else {
+                throw VPNError.startFailed("VPN profile is disabled in System Settings")
+            }
+            TunnelLog.write(
+                .info,
+                "vpn start requested enabled=\(session.manager.isEnabled) status=\(session.connection.status.rawValue)"
+            )
+            try session.connection.startVPNTunnel()
+            try await waitUntilConnected(timeout: .seconds(15))
             refreshStatus()
             startMetricsLoop()
-        } catch {
-            TunnelLog.write(.error, "vpn start failed: \(error.localizedDescription)")
+        } catch let error as VPNError {
+            wantsConnection = false
+            reconnectTask?.cancel()
+            reconnectTask = nil
             lastError = error.localizedDescription
             status = .error
+            TunnelLog.write(.error, "vpn start failed: \(error.localizedDescription)")
+            throw error
+        } catch {
+            wantsConnection = false
+            reconnectTask?.cancel()
+            reconnectTask = nil
+            lastError = error.localizedDescription
+            status = .error
+            TunnelLog.write(.error, "vpn start failed: \(error.localizedDescription)")
             throw VPNError.startFailed(error.localizedDescription)
         }
     }
@@ -298,6 +323,72 @@ public final class VPNManager {
     public func refreshStatus() {
         guard !isMock else { return }
         applyVPNStatus(tunnelManager?.connection.status ?? .invalid)
+    }
+
+    /// `startVPNTunnel()` returning is not connected — wait for NEVPNStatus.
+    /// Do not publish intermediate status here; that would trigger reconnect.
+    private func waitUntilConnected(timeout: Duration) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            let vpnStatus = tunnelManager?.connection.status ?? .invalid
+            if vpnStatus == .connected {
+                applyVPNStatus(vpnStatus)
+                return
+            }
+            if vpnStatus == .invalid {
+                throw VPNError.startFailed("VPN profile invalid")
+            }
+            try await Task.sleep(for: .milliseconds(150))
+        }
+        let vpnStatus = tunnelManager?.connection.status ?? .invalid
+        if vpnStatus == .connected {
+            applyVPNStatus(vpnStatus)
+            return
+        }
+        var detail = "Packet Tunnel did not connect (\(Self.statusName(vpnStatus)))"
+        if let extra = await lastDisconnectReason() {
+            detail += ": \(extra)"
+        }
+        TunnelLog.write(.error, detail)
+        throw VPNError.startFailed(detail)
+    }
+
+    private func lastDisconnectReason() async -> String? {
+        guard let connection = tunnelManager?.connection else { return nil }
+        do {
+            try await connection.fetchLastDisconnectError()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    private static func statusName(_ status: NEVPNStatus) -> String {
+        switch status {
+        case .invalid: "invalid"
+        case .disconnected: "disconnected"
+        case .connecting: "connecting"
+        case .connected: "connected"
+        case .reasserting: "reasserting"
+        case .disconnecting: "disconnecting"
+        @unknown default: "status=\(status.rawValue)"
+        }
+    }
+
+    private struct ReloadedSession {
+        var manager: NETunnelProviderManager
+        var connection: NEVPNConnection { manager.connection }
+    }
+
+    private static func reloadSession(matching bundleID: String) async throws -> ReloadedSession {
+        let all = try await NETunnelProviderManager.loadAllFromPreferences()
+        guard let found = all.first(where: { manager in
+            (manager.protocolConfiguration as? NETunnelProviderProtocol)?
+                .providerBundleIdentifier == bundleID
+        }) else {
+            throw VPNError.startFailed("VPN profile missing after save")
+        }
+        return ReloadedSession(manager: found)
     }
 
     // MARK: - IPC
@@ -434,7 +525,7 @@ extension VPNManager {
                 || previous == .connecting
                 || previous == .reconnecting
                 || previous == .disconnecting
-            if wantsConnection, droppedWhileUp {
+            if wantsConnection, droppedWhileUp, !startingTunnel {
                 handleExternalDisconnect()
             }
         }

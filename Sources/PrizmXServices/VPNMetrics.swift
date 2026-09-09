@@ -11,8 +11,16 @@ public typealias VPNMetrics = TrafficSnapshot
 public typealias TrafficByteCount = PrizmXCore.TrafficByteCount
 
 /// Failures raised by `VPNManager` when talking to NetworkExtension.
-public enum VPNError: Error, Sendable, Equatable {
+public enum VPNError: Error, Sendable, Equatable, LocalizedError {
     case notConfigured
     case startFailed(String)
     case ipcFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .notConfigured: "VPN is not configured"
+        case .startFailed(let message): message
+        case .ipcFailed(let message): message
+        }
+    }
 }
