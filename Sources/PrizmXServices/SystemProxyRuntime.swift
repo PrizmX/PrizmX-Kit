@@ -12,10 +12,23 @@ import PrizmXProtocols
 /// Tunnel. A dummy VPN just to host mixed-port steals the default route
 /// when TUN is off, so Safari cannot reach the internet.
 public final class SystemProxyRuntime: @unchecked Sendable {
+    /// Full-value signature for "already running this config" equality.
+    /// (Previously `hashValue`, which is not collision-free and can skip a
+    /// required restart.)
+    private struct Signature: Equatable {
+        var configText: String
+        var overlayBlob: Data
+        var allowLAN: Bool
+    }
+
     private struct State {
         var engine: Engine?
         var server: MixedPortServer?
-        var signature: String?
+        var signature: Signature?
+        /// Serializes `apply`: concurrent calls (e.g. rapid config switching)
+        /// would otherwise each start a server, and last-writer-wins state
+        /// would leak the loser's listener.
+        var applyChain: Task<Void, Error>?
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
@@ -27,7 +40,35 @@ public final class SystemProxyRuntime: @unchecked Sendable {
         overlay: ProfileOverlay,
         allowLAN: Bool
     ) async throws {
-        let signature = Self.signature(configText: configText, overlay: overlay, allowLAN: allowLAN)
+        let signature = Signature(
+            configText: configText,
+            overlayBlob: (try? JSONEncoder().encode(overlay)) ?? Data(),
+            allowLAN: allowLAN
+        )
+        let task: Task<Void, Error> = state.withLock { current in
+            let previous = current.applyChain
+            let task = Task { [weak self] in
+                // Wait out the in-flight apply; its failure must not block us.
+                _ = try? await previous?.value
+                try await self?.performApply(
+                    configText: configText,
+                    overlay: overlay,
+                    allowLAN: allowLAN,
+                    signature: signature
+                )
+            }
+            current.applyChain = task
+            return task
+        }
+        try await task.value
+    }
+
+    private func performApply(
+        configText: String,
+        overlay: ProfileOverlay,
+        allowLAN: Bool,
+        signature: Signature
+    ) async throws {
         let alreadyRunning = state.withLock {
             $0.signature == signature && $0.server != nil
         }
@@ -58,7 +99,7 @@ public final class SystemProxyRuntime: @unchecked Sendable {
         configText: String,
         overlay: ProfileOverlay,
         allowLAN: Bool,
-        signature: String
+        signature: Signature
     ) async throws {
         stopServer()
         let (router, _) = try ConfigAdapter.parse(rawString: configText, overlay: overlay)
@@ -101,15 +142,6 @@ public final class SystemProxyRuntime: @unchecked Sendable {
         }
         snapshot.0?.stop()
         snapshot.1?.stopURLTest()
-    }
-
-    private static func signature(
-        configText: String,
-        overlay: ProfileOverlay,
-        allowLAN: Bool
-    ) -> String {
-        let overlayBlob = (try? JSONEncoder().encode(overlay)) ?? Data()
-        return "\(allowLAN)|\(configText.utf8.count)|\(configText.hashValue)|\(overlayBlob.hashValue)"
     }
 }
 

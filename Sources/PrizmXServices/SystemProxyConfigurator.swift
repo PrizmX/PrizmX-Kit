@@ -63,7 +63,16 @@ public enum SystemProxyConfigurator {
         guard UserDefaults.standard.bool(forKey: appliedKey) else { return }
         let backups = loadBackup()
         let ok = mutateServices { current, serviceID in
-            backups[serviceID] ?? current
+            if let backup = backups[serviceID] { return backup }
+            // Backup entry missing (its write failed or the store was lost):
+            // fail closed — switch every proxy off rather than leaving the
+            // machine pointing at 127.0.0.1 forever.
+            var cleared = current
+            cleared[kSCPropNetProxiesHTTPEnable as String] = 0
+            cleared[kSCPropNetProxiesHTTPSEnable as String] = 0
+            cleared[kSCPropNetProxiesSOCKSEnable as String] = 0
+            cleared[kSCPropNetProxiesProxyAutoConfigEnable as String] = 0
+            return cleared
         }
         guard ok else { return }
         clearFlags()

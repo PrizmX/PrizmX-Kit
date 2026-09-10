@@ -37,9 +37,6 @@ public struct PingBadgeView: View {
 
     private var label: String {
         guard !isTimeout, let milliseconds else { return "Timeout" }
-        if milliseconds < 10 {
-            return String(format: "%.0f ms", milliseconds)
-        }
         return "\(Int(milliseconds.rounded())) ms"
     }
 

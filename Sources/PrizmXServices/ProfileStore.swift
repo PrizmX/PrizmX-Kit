@@ -46,6 +46,12 @@ public final class ProfileStore {
     @ObservationIgnored
     private var overlaysByID: [UUID: ProfileOverlay] = [:]
 
+    /// Records an error for the profile UI to surface. Hosts use this when
+    /// they catch a throwing mutation (`saveOverlay`, `upsert`, …).
+    public func recordError(_ error: Error) {
+        lastError = error.localizedDescription
+    }
+
     public var activeProfile: ProxyProfile? {
         guard let activeProfileID else { return nil }
         return profiles.first { $0.id == activeProfileID }

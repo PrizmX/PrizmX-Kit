@@ -3,15 +3,7 @@ import Network
 import PrizmXNodes
 import PrizmXProtocols
 
-/// Delay-test strategy for `NodePinger`.
-public enum NodePingMethod: Sendable, Hashable {
-    /// TCP handshake against the node's server endpoint.
-    case tcp
-    /// TCP handshake followed by a raw HTTP/1.1 `HEAD` on the same connection.
-    case http(path: String = "/")
-}
-
-/// Concurrent TCP / HTTP RTT probe against `OutboundNode` servers.
+/// Concurrent TCP RTT probe against `OutboundNode` servers.
 ///
 /// Returns milliseconds, or `nil` on timeout / connect failure. Direct nodes
 /// are skipped (`nil`). This does not dial through the proxy handshake — it
@@ -30,12 +22,11 @@ public struct NodePinger: Sendable {
     }
 
     /// Probes a single node. `nil` means timeout or unreachable.
-    public func ping(_ node: OutboundNode, method: NodePingMethod = .tcp) async -> Double? {
+    public func ping(_ node: OutboundNode) async -> Double? {
         guard let server = node.probeEndpoint else { return nil }
         return await measure(
             server: Self.dialTarget(for: server, pins: NodeAddressStore.load()),
-            serverName: server.host.description,
-            method: method
+            serverName: server.host.description
         )
     }
 
@@ -43,7 +34,6 @@ public struct NodePinger: Sendable {
     @discardableResult
     public func pingAll(
         _ nodes: [OutboundNode],
-        method: NodePingMethod = .tcp,
         progress: (@MainActor @Sendable (String, Double?) -> Void)? = nil
     ) async -> [String: Double?] {
         guard !nodes.isEmpty else { return [:] }
@@ -63,8 +53,7 @@ public struct NodePinger: Sendable {
                         if let server = node.probeEndpoint {
                             rtt = await self.measure(
                                 server: Self.dialTarget(for: server, pins: pins),
-                                serverName: server.host.description,
-                                method: method
+                                serverName: server.host.description
                             )
                         }
                         return (node.id, rtt)
@@ -104,7 +93,7 @@ public struct NodePinger: Sendable {
 
     // MARK: - Transport
 
-    private func measure(server: Endpoint, serverName: String, method: NodePingMethod) async -> Double? {
+    private func measure(server: Endpoint, serverName: String) async -> Double? {
         guard let nwEndpoint = Self.makeNWEndpoint(server) else { return nil }
 
         let parameters = NWParameters.tcp
@@ -122,15 +111,8 @@ public struct NodePinger: Sendable {
             return nil
         }
 
-        switch method {
-        case .tcp:
-            connection.cancel()
-            return Self.milliseconds(from: start)
-        case .http(let path):
-            let ok = await sendHEAD(connection, host: serverName, path: path)
-            connection.cancel()
-            return ok ? Self.milliseconds(from: start) : nil
-        }
+        connection.cancel()
+        return Self.milliseconds(from: start)
     }
 
     private func connect(_ connection: NWConnection, timeout: Duration) async -> Bool {
@@ -159,32 +141,6 @@ public struct NodePinger: Sendable {
             }
         } onCancel: {
             connection.cancel()
-        }
-    }
-
-    private func sendHEAD(_ connection: NWConnection, host: String, path: String) async -> Bool {
-        let normalizedPath = path.hasPrefix("/") ? path : "/" + path
-        let request = Data(
-            "HEAD \(normalizedPath) HTTP/1.1\r\nHost: \(host)\r\nConnection: close\r\n\r\n".utf8
-        )
-
-        let sent: Bool = await withCheckedContinuation { continuation in
-            connection.send(content: request, completion: .contentProcessed { error in
-                continuation.resume(returning: error == nil)
-            })
-        }
-        guard sent else { return false }
-
-        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            let gate = ResumeGate()
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 256) { data, _, _, error in
-                let ok = error == nil && (data?.isEmpty == false)
-                gate.finish(ok, continuation)
-            }
-            Task {
-                try? await Task.sleep(for: timeout)
-                gate.finish(false, continuation)
-            }
         }
     }
 

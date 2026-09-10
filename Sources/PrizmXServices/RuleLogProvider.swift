@@ -1,4 +1,3 @@
-import Combine
 import Foundation
 import Observation
 
@@ -34,8 +33,7 @@ public struct RuleLogItem: Identifiable, Sendable, Hashable, Codable {
 
 /// Main-actor ring buffer of the most recent split-routing events.
 ///
-/// ViewModels can either read `logs` through Observation or subscribe to
-/// `publisher` for Combine pipelines.
+/// ViewModels read `logs` through Observation.
 @MainActor
 @Observable
 public final class RuleLogProvider {
@@ -46,28 +44,16 @@ public final class RuleLogProvider {
     @ObservationIgnored
     private var buffer = RingBuffer<RuleLogItem>(capacity: RuleLogProvider.capacity)
 
-    @ObservationIgnored
-    private let logsSubject: CurrentValueSubject<[RuleLogItem], Never>
-
-    public var publisher: AnyPublisher<[RuleLogItem], Never> {
-        logsSubject.eraseToAnyPublisher()
-    }
-
-    public init() {
-        self.logsSubject = CurrentValueSubject([])
-    }
+    public init() {}
 
     public func addLog(_ item: RuleLogItem) {
         buffer.append(item)
-        let snapshot = buffer.elements
-        logs = snapshot
-        logsSubject.send(snapshot)
+        logs = buffer.elements
     }
 
     public func removeAll() {
         buffer.removeAll()
         logs = []
-        logsSubject.send([])
     }
 
     /// Sample rows so a log pane can render in Xcode Previews.

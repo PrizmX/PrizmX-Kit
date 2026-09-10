@@ -145,12 +145,14 @@ public final class TrafficLedger {
 
         day.totals.uploadDirect &+= directUpDelta
         day.totals.downloadDirect &+= directDownDelta
-        day.totals.uploadProxy &+= uploadDelta - directUpDelta
-        day.totals.downloadProxy &+= downloadDelta - directDownDelta
+        // Engine counters are not an atomic snapshot: a torn read can make
+        // direct > total, which must not trap on UInt64 underflow.
+        day.totals.uploadProxy &+= uploadDelta &- min(uploadDelta, directUpDelta)
+        day.totals.downloadProxy &+= downloadDelta &- min(downloadDelta, directDownDelta)
         month.uploadDirect &+= directUpDelta
         month.downloadDirect &+= directDownDelta
-        month.uploadProxy &+= uploadDelta - directUpDelta
-        month.downloadProxy &+= downloadDelta - directDownDelta
+        month.uploadProxy &+= uploadDelta &- min(uploadDelta, directUpDelta)
+        month.downloadProxy &+= downloadDelta &- min(downloadDelta, directDownDelta)
 
         for (policy, bytes) in policyDeltas {
             day.policy[policy, default: 0] &+= bytes
@@ -190,7 +192,14 @@ public final class TrafficLedger {
         return "arrow.triangle.branch"
     }
 
+    private var lastPersist = Date.distantPast
+
+    /// Writes are throttled: ingest runs on a 1s metrics loop and the payload
+    /// is the full day/month model, so an interval cap avoids pointless I/O.
     private func persist() {
+        let now = Date()
+        guard now.timeIntervalSince(lastPersist) >= 10 else { return }
+        lastPersist = now
         let file = File(days: days, months: months, last: last)
         if let data = try? JSONEncoder().encode(file) {
             UserDefaults.standard.set(data, forKey: Self.defaultsKey)

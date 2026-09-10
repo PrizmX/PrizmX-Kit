@@ -118,10 +118,11 @@ public final class VPNManager {
         guard !isMock else { return }
         do {
             let existing = try await NETunnelProviderManager.loadAllFromPreferences()
+            let bundleID = configuration.providerBundleIdentifier
             if let found = existing.first(where: { manager in
                 (manager.protocolConfiguration as? NETunnelProviderProtocol)?
-                    .providerBundleIdentifier == configuration.providerBundleIdentifier
-            }) ?? existing.first {
+                    .providerBundleIdentifier == bundleID
+            }) {
                 tunnelManager = found
             } else {
                 tunnelManager = NETunnelProviderManager()
@@ -170,12 +171,20 @@ public final class VPNManager {
         // before the extension's cold-spawn bootstrap reads them; a stale pin
         // is healed by the extension's last-resort re-resolution at dial time.
         let capturedDNS = dnsServers ?? PhysicalDNSSnapshot.capture()
-        Task {
-            _ = await NodeAddressStore.refresh(configText: configText, nameservers: capturedDNS)
-        }
-        TunnelLog.write(.info, "configure wrote \(configPath) bytes=\(configText.utf8.count) appDNS=\(capturedDNS)")
+        // Resolve before the tunnel hijacks system DNS, or node pins become
+        // FakeIP (198.18.0.0/16) and outbound dials connection-refused.
+        _ = await NodeAddressStore.refresh(
+            configText: configText,
+            nameservers: capturedDNS
+        )
+        let runtimeKit = try TunnelRuntimeStore.stageFromAppGroup()
+        TunnelLog.write(
+            .info,
+            "configure wrote \(configPath) bytes=\(configText.utf8.count) appDNS=\(capturedDNS) runtime=\(runtimeKit.path)"
+        )
         var payload: [String: Any] = [
             TunnelProviderKeys.configPath: configPath,
+            TunnelProviderKeys.containerPath: runtimeKit.path,
             TunnelProviderKeys.fakeIP: fakeIP,
             TunnelProviderKeys.systemProxy: systemProxy,
             TunnelProviderKeys.allowLAN: allowLAN,
@@ -216,7 +225,9 @@ public final class VPNManager {
         if isMock {
             status = .connecting
             try await Task.sleep(for: .milliseconds(250))
-            guard !Task.isCancelled else { return }
+            // stopVPN during the simulated handshake must win: don't flip
+            // back to .connected after the user asked to disconnect.
+            guard !Task.isCancelled, wantsConnection else { return }
             status = .connected
             apply(metrics: nextMockMetrics())
             startMetricsLoop()
@@ -275,10 +286,19 @@ public final class VPNManager {
                 .info,
                 "vpn start requested enabled=\(session.manager.isEnabled) status=\(session.connection.status.rawValue)"
             )
-            try session.connection.startVPNTunnel()
+            var options: [String: NSObject] = [:]
+            if let proto = session.manager.protocolConfiguration as? NETunnelProviderProtocol,
+               let root = proto.providerConfiguration?[TunnelProviderKeys.containerPath] as? String {
+                options[TunnelProviderKeys.containerPath] = root as NSString
+            }
+            try session.connection.startVPNTunnel(options: options.isEmpty ? nil : options)
             try await waitUntilConnected(timeout: .seconds(15))
             refreshStatus()
             startMetricsLoop()
+        } catch is CancellationError {
+            wantsConnection = false
+            startingTunnel = false
+            throw CancellationError()
         } catch let error as VPNError {
             wantsConnection = false
             reconnectTask?.cancel()

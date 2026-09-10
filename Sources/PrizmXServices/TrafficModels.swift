@@ -97,9 +97,4 @@ public struct TrafficTotals: Sendable, Hashable, Codable {
     public var upload: UInt64 { uploadProxy &+ uploadDirect }
     public var download: UInt64 { downloadProxy &+ downloadDirect }
     public var combined: UInt64 { upload &+ download }
-
-    public mutating func addProxy(upload: UInt64, download: UInt64) {
-        uploadProxy &+= upload
-        downloadProxy &+= download
-    }
 }

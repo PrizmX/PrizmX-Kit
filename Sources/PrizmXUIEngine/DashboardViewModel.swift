@@ -77,24 +77,20 @@ public final class DashboardViewModel {
 
     /// Persists the selected outbound and notifies a running Packet Tunnel.
     public func selectNode(_ node: OutboundNode) {
-        let groupName = resolvedGroupName(for: node)
-        try? profiles.setSelectedNode(id: node.id, groupName: groupName)
-        if let manager = profiles.nodeManager, let groupName {
-            try? manager.select(nodeID: node.id, inGroup: groupName)
-        }
-        if let groupName {
-            profiles.setPolicySelection(node.id, inGroup: groupName)
-        }
-        Task {
-            await vpn.notifySelectedNode(id: node.id, groupName: groupName)
-        }
+        applySelection(node.id, inGroup: resolvedGroupName(for: node))
     }
 
     /// Policies: persist `group → member` (node, nested group, or DIRECT).
     public func selectPolicyMember(_ memberID: String, inGroup groupName: String) {
+        applySelection(memberID, inGroup: groupName)
+    }
+
+    private func applySelection(_ memberID: String, inGroup groupName: String?) {
         try? profiles.setSelectedNode(id: memberID, groupName: groupName)
-        try? profiles.nodeManager?.select(nodeID: memberID, inGroup: groupName)
-        profiles.setPolicySelection(memberID, inGroup: groupName)
+        if let groupName {
+            try? profiles.nodeManager?.select(nodeID: memberID, inGroup: groupName)
+            profiles.setPolicySelection(memberID, inGroup: groupName)
+        }
         Task {
             await vpn.notifySelectedNode(id: memberID, groupName: groupName)
         }

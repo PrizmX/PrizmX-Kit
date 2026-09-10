@@ -1,5 +1,5 @@
 import SwiftUI
-import PrizmXUIEngine
+import PrizmXServices
 
 /// Compact live throughput row: uplink / downlink arrows plus formatted rates.
 public struct SpeedMeterView: View {

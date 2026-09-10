@@ -1,5 +1,5 @@
 import SwiftUI
-import PrizmXUIEngine
+import PrizmXServices
 
 /// Traffic-light status indicator with a pulse (connected) or breathing
 /// (connecting) animation.

@@ -154,15 +154,15 @@ public final class NodeListViewModel {
         return viewModel
     }
 
-    /// Runs a bounded concurrent TCP / HTTP probe and updates `latencyByNodeID`
+    /// Runs a bounded concurrent TCP probe and updates `latencyByNodeID`
     /// as replies arrive. Cooperative cancellation stops remaining workers.
-    public func pingAllNodes(method: NodePingMethod = .tcp) async {
+    public func pingAllNodes() async {
         pingGeneration += 1
         pingTask?.cancel()
         let generation = pingGeneration
         let task = Task<Void, Never>(priority: .utility) { [weak self] in
             guard let self else { return }
-            await self.runPingAll(method: method, generation: generation)
+            await self.runPingAll(generation: generation)
         }
         pingTask = task
         await withTaskCancellationHandler {
@@ -179,8 +179,8 @@ public final class NodeListViewModel {
         isPinging = false
     }
 
-    public func ping(_ node: OutboundNode, method: NodePingMethod = .tcp) async {
-        let rtt = await pinger.ping(node, method: method)
+    public func ping(_ node: OutboundNode) async {
+        let rtt = await pinger.ping(node)
         latencyByNodeID[node.id] = rtt
     }
 
@@ -249,7 +249,7 @@ public final class NodeListViewModel {
         return sections
     }
 
-    private func runPingAll(method: NodePingMethod, generation: Int) async {
+    private func runPingAll(generation: Int) async {
         let nodes = uniqueNodes
         guard !nodes.isEmpty else { return }
 
@@ -265,8 +265,10 @@ public final class NodeListViewModel {
         }
 
         // Bounded worker pool lives in NodePinger; results stream back on the
-        // main actor as each probe lands.
-        await pinger.pingAll(nodes, method: method) { nodeID, rtt in
+        // main actor as each probe lands. Results from a superseded generation
+        // (cancelled but already in flight) are discarded.
+        await pinger.pingAll(nodes) { nodeID, rtt in
+            guard self.pingGeneration == generation else { return }
             self.latencyByNodeID[nodeID] = rtt
         }
     }
