@@ -30,11 +30,8 @@ public final class VPNManager {
         }
 
         public static var `default`: Configuration {
-            #if os(macOS)
-            Configuration(providerBundleIdentifier: "app.prizmx.macos.packet-tunnel")
-            #else
-            Configuration(providerBundleIdentifier: "app.prizmx.packet-tunnel")
-            #endif
+            let host = Bundle.main.bundleIdentifier ?? "app.prizmx.macos"
+            return Configuration(providerBundleIdentifier: "\(host).packet-tunnel")
         }
     }
 
