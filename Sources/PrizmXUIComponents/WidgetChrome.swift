@@ -83,6 +83,10 @@ public enum WidgetTypography {
     public static let hint = Font.caption
     public static let switchTitle = Font.subheadline.weight(.semibold)
     public static let switchSubtitle = Font.caption
+    /// 1×1 metric tiles share this title-row height so accessories cannot
+    /// shift the icon, label, or the number on the next line.
+    public static let headerRowHeight: CGFloat = 16
+    public static let headerIconSize: CGFloat = 14
 }
 
 public enum WidgetChrome {
@@ -267,25 +271,27 @@ public struct WidgetHeader<Accessory: View>: View {
             HStack(alignment: .center, spacing: 6) {
                 if let systemImage {
                     Image(systemName: systemImage)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 14, height: 14)
+                        .font(WidgetTypography.cardTitle)
                         .foregroundStyle(.secondary)
+                        .frame(
+                            width: WidgetTypography.headerIconSize,
+                            height: WidgetTypography.headerIconSize,
+                            alignment: .center
+                        )
                 }
                 Text(title.uppercased())
                     .font(WidgetTypography.cardTitle)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 0)
+            }
+            .frame(height: WidgetTypography.headerRowHeight, alignment: .leading)
+            .overlay(alignment: .trailing) {
                 accessory()
             }
             if let headline {
                 Text(headline)
-                    .font(
-                        size == .small
-                            ? .title2.monospacedDigit().weight(.semibold)
-                            : .title.monospacedDigit().weight(.semibold)
-                    )
+                    .font(WidgetTypography.metric)
                     .lineLimit(1)
                     .minimumScaleFactor(0.45)
             }

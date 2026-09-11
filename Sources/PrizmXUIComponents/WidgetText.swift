@@ -1,6 +1,54 @@
 import SwiftUI
 import PrizmXServices
 
+/// Icon + uppercase label, then the metric line. Shared by 1×1 Home tiles
+/// (latency / connections / upload / download) so those three pieces line up.
+public struct WidgetMetricBlock<Accessory: View, Value: View>: View {
+    public var title: String
+    public var systemImage: String
+    @ViewBuilder public var accessory: () -> Accessory
+    @ViewBuilder public var value: () -> Value
+
+    public init(
+        title: String,
+        systemImage: String,
+        @ViewBuilder accessory: @escaping () -> Accessory,
+        @ViewBuilder value: @escaping () -> Value
+    ) {
+        self.title = title
+        self.systemImage = systemImage
+        self.accessory = accessory
+        self.value = value
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            WidgetHeader(
+                title: title,
+                systemImage: systemImage,
+                size: .small,
+                accessory: accessory
+            )
+            value()
+        }
+    }
+}
+
+extension WidgetMetricBlock where Accessory == EmptyView {
+    public init(
+        title: String,
+        systemImage: String,
+        @ViewBuilder value: @escaping () -> Value
+    ) {
+        self.init(
+            title: title,
+            systemImage: systemImage,
+            accessory: { EmptyView() },
+            value: value
+        )
+    }
+}
+
 /// Big value + smaller unit, baseline-aligned.
 public struct WidgetSplitValue: View {
     public var value: String
@@ -23,6 +71,29 @@ public struct WidgetSplitValue: View {
                     .lineLimit(1)
             }
         }
+    }
+}
+
+/// Two protocol counts on the Connections headline: `10 TCP / 8 UDP`.
+public struct WidgetProtocolSplitValue: View {
+    public var tcp: Int
+    public var udp: Int
+
+    public init(tcp: Int, udp: Int) {
+        self.tcp = tcp
+        self.udp = udp
+    }
+
+    public var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            WidgetSplitValue(value: "\(tcp)", unit: "TCP")
+            Text("/")
+                .font(WidgetTypography.unit)
+                .foregroundStyle(.tertiary)
+            WidgetSplitValue(value: "\(udp)", unit: "UDP")
+        }
+        .lineLimit(1)
+        .minimumScaleFactor(0.55)
     }
 }
 

@@ -422,14 +422,26 @@ public final class VPNManager {
 
     // MARK: - IPC
 
-    /// Live throughput: Packet Tunnel IPC plus in-app mixed-port counters.
+    /// Live throughput: Packet Tunnel counters plus in-app mixed-port.
     /// Mixed-port is polled even when the tunnel is down (System Proxy only).
+    ///
+    /// macOS system-extension sessions often return empty `sendProviderMessage`
+    /// replies while the tunnel is still forwarding. The extension dumps a
+    /// snapshot into the kit; the host reads that file. iOS keeps IPC.
     public func fetchMetrics() async -> VPNMetrics {
         if isMock {
             return status == .connected ? nextMockMetrics() : .zero
         }
         let local = localMetricsProvider?() ?? .zero
         guard status == .connected else { return local }
+        #if os(macOS)
+        // Do not fall through to sendProviderMessage: on a system extension
+        // the reply often never arrives and the 1s poller hangs at zero.
+        if let file = TunnelMetricsStore.load() {
+            return file.merging(local)
+        }
+        return local
+        #else
         guard let session = tunnelManager?.connection as? NETunnelProviderSession else {
             return local
         }
@@ -457,6 +469,7 @@ public final class VPNManager {
             // Provider may not have registered IPC yet; keep mixed-port alive.
             return local
         }
+        #endif
     }
 
     /// Notifies a running tunnel that the selected outbound changed.

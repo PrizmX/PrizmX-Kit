@@ -26,10 +26,14 @@ public enum MockTrafficGenerator: Sendable {
             phase: 0.6
         )
         let connections = Int((48.0 + 10.0 * sin(epoch * 0.35)).rounded())
+        let total = max(8, connections)
+        let udp = min(8, total / 6)
         return VPNMetrics(
             uploadBytesPerSecond: upload,
             downloadBytesPerSecond: download,
-            activeConnections: max(8, connections),
+            activeConnections: total,
+            tcpConnections: total - udp,
+            udpConnections: udp,
             activeFlows: previewActiveFlows(at: date),
             recentFlows: [previewRecentFlow(at: date)]
         )

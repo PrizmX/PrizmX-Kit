@@ -97,12 +97,7 @@ public struct RateCard: View {
                     verticalFill: Double(WidgetChrome.plotFraction)
                 )
 
-                VStack(alignment: .leading, spacing: 6) {
-                    WidgetHeader(
-                        title: title,
-                        systemImage: systemImage,
-                        size: .small
-                    )
+                WidgetMetricBlock(title: title, systemImage: systemImage) {
                     WidgetRateValue(bytesPerSecond: rate)
                 }
                 .padding(WidgetChrome.padding)
@@ -495,15 +490,18 @@ public struct OutboundCard<PickerContent: View>: View {
 /// Distinct from the sidebar's Debug → Capture (HTTP recording).
 public struct TakeoverCard: View {
     public var headline: String
+    public var startedAt: Date?
     public var proxyIsOn: Binding<Bool>
     public var tunIsOn: Binding<Bool>
 
     public init(
         headline: String,
+        startedAt: Date? = nil,
         proxyIsOn: Binding<Bool>,
         tunIsOn: Binding<Bool>
     ) {
         self.headline = headline
+        self.startedAt = startedAt
         self.proxyIsOn = proxyIsOn
         self.tunIsOn = tunIsOn
     }
@@ -517,7 +515,9 @@ public struct TakeoverCard: View {
                         title: "Takeover",
                         systemImage: "network",
                         size: .medium
-                    )
+                    ) {
+                        sessionClock
+                    }
                     WidgetSplitValue(value: headline)
                     Spacer(minLength: 0)
                     HStack(alignment: .top, spacing: 12) {
@@ -541,11 +541,81 @@ public struct TakeoverCard: View {
             }
         }
     }
+
+    @ViewBuilder
+    private var sessionClock: some View {
+        if startedAt != nil {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                Text(Self.uptime(from: startedAt, now: context.date))
+                    .font(WidgetTypography.unit)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        }
+    }
+
+    private static func uptime(from start: Date?, now: Date) -> String {
+        guard let start else { return "" }
+        let total = max(0, Int(now.timeIntervalSince(start)))
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let seconds = total % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
+        }
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
 }
 
 enum TakeoverLayout {
     /// Header + metric + two subtitle tiles. Below this, drop switch subtitles.
     static let regularMinHeight: CGFloat = 120
+}
+
+// MARK: - LAN
+
+/// Allow LAN summary: listen address, mixed-port, client count (later).
+public struct LANCard: View {
+    @Binding public var isOn: Bool
+    public var address: String
+    public var port: Int
+    public var deviceCount: Int
+
+    public init(
+        isOn: Binding<Bool>,
+        address: String,
+        port: Int,
+        deviceCount: Int = 0
+    ) {
+        self._isOn = isOn
+        self.address = address
+        self.port = port
+        self.deviceCount = deviceCount
+    }
+
+    public var body: some View {
+        WidgetCard(size: .medium) {
+            VStack(alignment: .leading, spacing: 4) {
+                WidgetHeader(
+                    title: "LAN",
+                    systemImage: "laptopcomputer.and.iphone",
+                    size: .medium
+                ) {
+                    Toggle("Allow LAN", isOn: $isOn)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .help("Other devices can use this Mac as HTTP/SOCKS")
+                }
+                WidgetSplitValue(value: address)
+                Spacer(minLength: 0)
+                WidgetFootRow(items: [
+                    ("Port", "\(port)"),
+                    ("Devices", "\(deviceCount)")
+                ])
+            }
+        }
+    }
 }
 
 // MARK: - Profile
@@ -720,38 +790,38 @@ extension NodeCard where Accessory == EmptyView {
 public struct LatencyCard<Accessory: View>: View {
     public var value: String
     public var unit: String
-    public var nodeText: String?
-    public var bestText: String?
+    public var dnsText: String?
+    public var proxyText: String?
     @ViewBuilder public var accessory: () -> Accessory
 
     public init(
         value: String,
         unit: String,
-        nodeText: String? = nil,
-        bestText: String? = nil,
+        dnsText: String? = nil,
+        proxyText: String? = nil,
         @ViewBuilder accessory: @escaping () -> Accessory
     ) {
         self.value = value
         self.unit = unit
-        self.nodeText = nodeText
-        self.bestText = bestText
+        self.dnsText = dnsText
+        self.proxyText = proxyText
         self.accessory = accessory
     }
 
     public var body: some View {
         WidgetCard(size: .small) {
-            VStack(alignment: .leading, spacing: 4) {
-                WidgetHeader(
+            VStack(alignment: .leading, spacing: 6) {
+                WidgetMetricBlock(
                     title: "Latency",
                     systemImage: "gauge.with.dots.needle.67percent",
-                    size: .small,
                     accessory: accessory
-                )
-                WidgetSplitValue(value: value, unit: unit)
+                ) {
+                    WidgetSplitValue(value: value, unit: unit)
+                }
                 Spacer(minLength: 0)
                 WidgetFootRow(items: optionalFootItems([
-                    ("Node", nodeText),
-                    ("Best", bestText)
+                    ("DNS", dnsText),
+                    ("Proxy", proxyText)
                 ]))
             }
         }
@@ -762,14 +832,14 @@ extension LatencyCard where Accessory == EmptyView {
     public init(
         value: String,
         unit: String,
-        nodeText: String? = nil,
-        bestText: String? = nil
+        dnsText: String? = nil,
+        proxyText: String? = nil
     ) {
         self.init(
             value: value,
             unit: unit,
-            nodeText: nodeText,
-            bestText: bestText,
+            dnsText: dnsText,
+            proxyText: proxyText,
             accessory: { EmptyView() }
         )
     }
@@ -777,56 +847,40 @@ extension LatencyCard where Accessory == EmptyView {
 
 // MARK: - Connections
 
-public struct ConnectionsCard<Accessory: View>: View {
-    public var count: Int
-    public var processesText: String?
-    public var hostsText: String?
-    @ViewBuilder public var accessory: () -> Accessory
+public struct ConnectionsCard: View {
+    public var tcpCount: Int
+    public var udpCount: Int
+    public var processesText: String
+    public var hostsText: String
 
     public init(
-        count: Int,
-        processesText: String? = nil,
-        hostsText: String? = nil,
-        @ViewBuilder accessory: @escaping () -> Accessory
+        tcpCount: Int,
+        udpCount: Int,
+        processesText: String = "0",
+        hostsText: String = "0"
     ) {
-        self.count = count
+        self.tcpCount = tcpCount
+        self.udpCount = udpCount
         self.processesText = processesText
         self.hostsText = hostsText
-        self.accessory = accessory
     }
 
     public var body: some View {
         WidgetCard(size: .small) {
-            VStack(alignment: .leading, spacing: 4) {
-                WidgetHeader(
+            VStack(alignment: .leading, spacing: 6) {
+                WidgetMetricBlock(
                     title: "Connections",
-                    systemImage: "link",
-                    size: .small,
-                    accessory: accessory
-                )
-                WidgetSplitValue(value: "\(count)")
+                    systemImage: "link"
+                ) {
+                    WidgetProtocolSplitValue(tcp: tcpCount, udp: udpCount)
+                }
                 Spacer(minLength: 0)
-                WidgetFootRow(items: optionalFootItems([
+                WidgetFootRow(items: [
                     ("Processes", processesText),
                     ("Hosts", hostsText)
-                ]))
+                ])
             }
         }
-    }
-}
-
-extension ConnectionsCard where Accessory == EmptyView {
-    public init(
-        count: Int,
-        processesText: String? = nil,
-        hostsText: String? = nil
-    ) {
-        self.init(
-            count: count,
-            processesText: processesText,
-            hostsText: hostsText,
-            accessory: { EmptyView() }
-        )
     }
 }
 

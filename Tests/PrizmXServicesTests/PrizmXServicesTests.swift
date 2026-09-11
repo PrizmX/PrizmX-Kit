@@ -154,6 +154,13 @@ func nodePingerDialsPinnedIPForDomainNodes() {
     #expect(NodePinger.dialTarget(for: literal, pins: ["192.0.2.1": [pinned]]) == literal)
 }
 
+@Test
+func pathLatencyProbeUsesDirectInternetHosts() {
+    #expect(PathLatencyProbe.internetHosts.contains("1.1.1.1"))
+    #expect(PathLatencyProbe.internetHosts.contains("223.5.5.5"))
+    #expect(!PathLatencyProbe.dnsProbeDomain.isEmpty)
+}
+
 @MainActor
 @Test
 func profileOverlayMergesInFrontOfBodyRules() throws {
