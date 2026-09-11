@@ -48,6 +48,12 @@ public final class VPNManager {
     public private(set) var lastMetrics: VPNMetrics = .zero
     public private(set) var lastError: String?
 
+    /// Host-side failures (system-extension activation, etc.) that happen
+    /// before `startVPN` runs.
+    public func reportHostError(_ error: Error) {
+        lastError = error.localizedDescription
+    }
+
     @ObservationIgnored
     private var tunnelManager: NETunnelProviderManager?
     @ObservationIgnored
@@ -58,6 +64,10 @@ public final class VPNManager {
     /// the tunnel came up outside the app, false when the user turned it off.
     /// Lets the UI sync its TUN intent instead of fighting the system.
     public var onExternalStateChange: (@MainActor (Bool) -> Void)?
+
+    /// Mixed-port engine lives in the host app (not the system extension).
+    /// Polled alongside tunnel IPC so System Proxy traffic still shows in the UI.
+    public var localMetricsProvider: (@Sendable () -> TrafficSnapshot)?
 
     /// User intent: startVPN sets it, stopVPN clears it. A disconnect without
     /// stopVPN means the system killed the plugin (rebuild, update, reclaim)
@@ -101,6 +111,8 @@ public final class VPNManager {
             }
         }
         Task { await loadManager() }
+        // Mixed-port counters exist even when the Packet Tunnel is down.
+        startMetricsLoop()
     }
 
     deinit {
@@ -328,10 +340,10 @@ public final class VPNManager {
             tunnelManager?.connection.stopVPNTunnel()
             TunnelLog.write(.info, "vpn stop requested")
         }
-        stopMetricsLoop()
-        resetThroughput()
         if isMock {
             status = .disconnected
+            stopMetricsLoop()
+            apply(metrics: .zero)
         } else {
             refreshStatus()
         }
@@ -410,15 +422,16 @@ public final class VPNManager {
 
     // MARK: - IPC
 
-    /// Asks the Packet Tunnel for a live throughput snapshot.
-    /// Returns `.zero` when the session is down or IPC fails.
+    /// Live throughput: Packet Tunnel IPC plus in-app mixed-port counters.
+    /// Mixed-port is polled even when the tunnel is down (System Proxy only).
     public func fetchMetrics() async -> VPNMetrics {
         if isMock {
             return status == .connected ? nextMockMetrics() : .zero
         }
-        guard status == .connected else { return .zero }
+        let local = localMetricsProvider?() ?? .zero
+        guard status == .connected else { return local }
         guard let session = tunnelManager?.connection as? NETunnelProviderSession else {
-            return .zero
+            return local
         }
 
         let payload: Data
@@ -426,7 +439,7 @@ public final class VPNManager {
             payload = try TunnelIPC.encode(.init(method: .fetchMetrics))
         } catch {
             lastError = error.localizedDescription
-            return .zero
+            return local
         }
 
         do {
@@ -439,10 +452,10 @@ public final class VPNManager {
                     continuation.resume(throwing: error)
                 }
             }
-            return try TunnelIPC.metrics(from: responseData)
+            return try TunnelIPC.metrics(from: responseData).merging(local)
         } catch {
-            // Provider may not have registered IPC yet; keep the UI alive.
-            return .zero
+            // Provider may not have registered IPC yet; keep mixed-port alive.
+            return local
         }
     }
 
@@ -534,8 +547,7 @@ extension VPNManager {
             }
             startMetricsLoop()
         } else if next == .disconnected || next == .invalid || next == .error {
-            stopMetricsLoop()
-            resetThroughput()
+            // Keep the 1s poller: mixed-port in the app still has live counters.
             // Only a drop *from* an active session is unexpected. A start
             // while already disconnected must not read a stale user-stop.
             let droppedWhileUp = previous == .connected
@@ -613,10 +625,8 @@ extension VPNManager {
         metricsTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                if self.status == .connected {
-                    let metrics = await self.fetchMetrics()
-                    self.apply(metrics: metrics)
-                }
+                let metrics = await self.fetchMetrics()
+                self.apply(metrics: metrics)
                 try? await Task.sleep(for: Self.metricsPollInterval)
             }
         }

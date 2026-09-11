@@ -109,16 +109,19 @@ public struct WidgetHint: View {
     }
 
     public var body: some View {
-        HStack(alignment: .top, spacing: 6) {
+        HStack(alignment: .center, spacing: 6) {
             Image(systemName: systemImage)
-                .font(WidgetTypography.footLabel)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 14, height: 14)
                 .foregroundStyle(.secondary)
-                .frame(width: 14)
             Text(text)
                 .font(WidgetTypography.hint)
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(height: 16)
     }
 }
 

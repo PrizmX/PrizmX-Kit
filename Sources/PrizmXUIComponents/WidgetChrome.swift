@@ -90,6 +90,49 @@ public enum WidgetChrome {
     public static let cornerRadius: CGFloat = 12
     public static let plotFraction: CGFloat = 0.8
 
+    // MARK: Inks
+    // Theme matches the app AccentColor asset (#5341F5 / #9B8CFF).
+    // Traffic and transport stay off that purple so direction vs protocol never collide.
+
+    /// Brand / chrome (sidebar selection, tags, ranking, progress).
+    public static var accent: Color {
+        ink(dark: (0x9B / 255, 0x8C / 255, 1), light: (0x53 / 255, 0x41 / 255, 0xF5 / 255))
+    }
+
+    /// Upload. Saturated orange so it still reads on the 248-gray card.
+    public static var trafficUpload: Color {
+        ink(dark: (1, 0.58, 0.22), light: (0.90, 0.38, 0.08))
+    }
+
+    /// Download. Cool blue, lifted in dark so it sits on 40-gray.
+    public static var trafficDownload: Color {
+        ink(dark: (0.38, 0.72, 1), light: (0.12, 0.46, 0.90))
+    }
+
+    /// TCP flows (Inspector / protocol chips). Teal, away from download blue.
+    public static var transportTCP: Color {
+        ink(dark: (0.32, 0.86, 0.78), light: (0.00, 0.58, 0.54))
+    }
+
+    /// UDP / QUIC flows. Magenta, away from upload orange and theme purple.
+    public static var transportUDP: Color {
+        ink(dark: (0.95, 0.50, 0.74), light: (0.76, 0.18, 0.52))
+    }
+
+    private static func ink(
+        dark: (CGFloat, CGFloat, CGFloat),
+        light: (CGFloat, CGFloat, CGFloat)
+    ) -> Color {
+        #if os(macOS)
+        adaptive(
+            dark: NSColor(srgbRed: dark.0, green: dark.1, blue: dark.2, alpha: 1),
+            light: NSColor(srgbRed: light.0, green: light.1, blue: light.2, alpha: 1)
+        )
+        #else
+        Color(red: light.0, green: light.1, blue: light.2)
+        #endif
+    }
+
     #if os(macOS)
     /// Resolves a dark/light pair against the window appearance.
     private static func adaptive(dark: NSColor, light: NSColor) -> Color {
@@ -186,13 +229,14 @@ public struct WidgetCard<Content: View>: View {
 
     public var body: some View {
         let pixel = size.pixelSize(unit: unit, spacing: WidgetGrid.spacing)
+        // Pixel frame before chrome so a tall child cannot inflate the fill.
         content()
             .padding(padded ? WidgetChrome.padding : 0)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(width: pixel.width, height: pixel.height)
             .clipShape(WidgetChrome.shape)
             .background(WidgetChrome.fill, in: WidgetChrome.shape)
             .shadow(color: WidgetChrome.cardShadow, radius: 2.5, y: 1.5)
-            .frame(width: pixel.width, height: pixel.height)
     }
 }
 
@@ -223,9 +267,10 @@ public struct WidgetHeader<Accessory: View>: View {
             HStack(alignment: .center, spacing: 6) {
                 if let systemImage {
                     Image(systemName: systemImage)
-                        .font(WidgetTypography.cardTitle)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 14, height: 14)
                         .foregroundStyle(.secondary)
-                        .frame(width: 14)
                 }
                 Text(title.uppercased())
                     .font(WidgetTypography.cardTitle)

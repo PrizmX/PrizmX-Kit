@@ -47,6 +47,8 @@ public struct TrafficRankRow: Identifiable, Hashable, Sendable, Codable {
     public var fraction: Double
     public var systemImage: String
     public var bundleID: String?
+    public var tcpBytes: UInt64
+    public var udpBytes: UInt64
 
     public init(
         id: String,
@@ -54,7 +56,9 @@ public struct TrafficRankRow: Identifiable, Hashable, Sendable, Codable {
         bytes: UInt64,
         fraction: Double,
         systemImage: String = "app.fill",
-        bundleID: String? = nil
+        bundleID: String? = nil,
+        tcpBytes: UInt64 = 0,
+        udpBytes: UInt64 = 0
     ) {
         self.id = id
         self.name = name
@@ -62,17 +66,37 @@ public struct TrafficRankRow: Identifiable, Hashable, Sendable, Codable {
         self.fraction = fraction
         self.systemImage = systemImage
         self.bundleID = bundleID
+        self.tcpBytes = tcpBytes
+        self.udpBytes = udpBytes
     }
 }
 
 public struct RankingHourSample: Identifiable, Hashable, Sendable, Codable {
+    /// Position in the rolling 24-hour window (0 = oldest, 23 = current hour).
+    public var index: Int
+    /// Clock hour 0...23 for axis labels.
     public var hour: Int
+    /// Start of this hour (local).
+    public var startedAt: Date
     public var bytes: Double
-    public var id: Int { hour }
+    public var proxyBytes: UInt64
+    public var directBytes: UInt64
+    public var id: Int { index }
 
-    public init(hour: Int, bytes: Double) {
+    public init(
+        hour: Int,
+        bytes: Double,
+        index: Int? = nil,
+        startedAt: Date = .now,
+        proxyBytes: UInt64 = 0,
+        directBytes: UInt64 = 0
+    ) {
         self.hour = hour
         self.bytes = bytes
+        self.index = index ?? hour
+        self.startedAt = startedAt
+        self.proxyBytes = proxyBytes
+        self.directBytes = directBytes
     }
 }
 

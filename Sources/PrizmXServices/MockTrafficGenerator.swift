@@ -26,7 +26,42 @@ public enum MockTrafficGenerator: Sendable {
             phase: 0.6
         )
         let connections = Int((48.0 + 10.0 * sin(epoch * 0.35)).rounded())
-        let sample = FlowRecord(
+        return VPNMetrics(
+            uploadBytesPerSecond: upload,
+            downloadBytesPerSecond: download,
+            activeConnections: max(8, connections),
+            activeFlows: previewActiveFlows(at: date),
+            recentFlows: [previewRecentFlow(at: date)]
+        )
+    }
+
+    private static func previewActiveFlows(at date: Date) -> [FlowRecord] {
+        let safari = FlowAttribution(pid: 1, processName: "Safari", bundleID: "com.apple.Safari")
+        let music = FlowAttribution(pid: 2, processName: "Music", bundleID: "com.apple.Music")
+        return [
+            FlowRecord(
+                startedAt: date.addingTimeInterval(-8),
+                endpoint: Endpoint(domain: "github.com", port: 443),
+                via: "Proxies",
+                uplinkBytes: 4_200,
+                downlinkBytes: 88_000,
+                closed: false,
+                attribution: safari
+            ),
+            FlowRecord(
+                startedAt: date.addingTimeInterval(-3),
+                endpoint: Endpoint(domain: "apple.com", port: 443),
+                via: "Direct",
+                uplinkBytes: 1_100,
+                downlinkBytes: 22_000,
+                closed: false,
+                attribution: music
+            )
+        ]
+    }
+
+    private static func previewRecentFlow(at date: Date) -> FlowRecord {
+        FlowRecord(
             startedAt: date.addingTimeInterval(-2),
             endpoint: Endpoint(domain: "github.com", port: 443),
             via: "Proxies",
@@ -36,12 +71,6 @@ public enum MockTrafficGenerator: Sendable {
             clientEnd: "eof",
             remoteEnd: "eof",
             closed: true
-        )
-        return VPNMetrics(
-            uploadBytesPerSecond: upload,
-            downloadBytesPerSecond: download,
-            activeConnections: max(8, connections),
-            recentFlows: [sample]
         )
     }
 

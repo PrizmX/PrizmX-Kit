@@ -95,6 +95,28 @@ public final class SystemProxyRuntime: @unchecked Sendable {
         stopServer()
     }
 
+    /// Re-apply persisted node selections and outbound mode to the live
+    /// mixed-port engine. `notifySelectedNode` only IPCs the Packet Tunnel —
+    /// without this, System-Proxy-only traffic keeps the old node forever.
+    public func reloadSelections() {
+        let selections = PolicySelectionStore.load()
+        let stored = OutboundModeStore.load()
+        state.withLock {
+            $0.engine?.nodeManager.applySelections(selections)
+            $0.engine?.setOutboundMode(stored.mode, globalGroup: stored.globalGroup)
+        }
+    }
+
+    /// Live mixed-port counters. Mutates the engine sample window — call from
+    /// the single 1s UI poller only.
+    public func metrics() -> TrafficSnapshot {
+        state.withLock { $0.engine?.traffic.snapshot() } ?? .zero
+    }
+
+    public func clearFlows() {
+        state.withLock { $0.engine?.traffic.clearRecent() }
+    }
+
     private func startServer(
         configText: String,
         overlay: ProfileOverlay,
@@ -162,6 +184,8 @@ public final class SystemProxyRuntime: @unchecked Sendable {
 
     public func shutdown() {}
     public func invalidate() {}
+    public func metrics() -> TrafficSnapshot { .zero }
+    public func clearFlows() {}
 }
 
 #endif
