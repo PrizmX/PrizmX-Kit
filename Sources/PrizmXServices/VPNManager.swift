@@ -13,20 +13,32 @@ import PrizmXProtocols
 @MainActor
 @Observable
 public final class VPNManager {
+    /// How the host reads Packet Tunnel counters. The app chooses this from
+    /// its packaging; Kit does not infer Developer ID vs Debug vs MAS.
+    public enum MetricsChannel: Sendable, Equatable {
+        /// `NETunnelProviderSession.sendProviderMessage`.
+        case providerMessage
+        /// Packet Tunnel writes `tunnel/metrics.json` under the kit root.
+        case kitFile
+    }
+
     public struct Configuration: Sendable, Equatable {
         /// Packet tunnel network-extension bundle identifier.
         public var providerBundleIdentifier: String
         public var localizedDescription: String
         public var serverAddress: String
+        public var metricsChannel: MetricsChannel
 
         public init(
             providerBundleIdentifier: String,
             localizedDescription: String = "PrizmX",
-            serverAddress: String = "PrizmX"
+            serverAddress: String = "PrizmX",
+            metricsChannel: MetricsChannel = .providerMessage
         ) {
             self.providerBundleIdentifier = providerBundleIdentifier
             self.localizedDescription = localizedDescription
             self.serverAddress = serverAddress
+            self.metricsChannel = metricsChannel
         }
 
         public static var `default`: Configuration {
@@ -34,6 +46,9 @@ public final class VPNManager {
             return Configuration(providerBundleIdentifier: "\(host).packet-tunnel")
         }
     }
+
+    /// Host apps assign this before the first `VPNManager.shared` access.
+    public static var metricsChannel: MetricsChannel = .providerMessage
 
     public static let shared = VPNManager()
     public static let metricsPollInterval: Duration = .seconds(1)
@@ -91,6 +106,10 @@ public final class VPNManager {
     private var mockDownlinkBytes: UInt64 = 0
 
     public init(configuration: Configuration = .default, isMock: Bool = false) {
+        var configuration = configuration
+        if !isMock {
+            configuration.metricsChannel = Self.metricsChannel
+        }
         self.configuration = configuration
         self.isMock = isMock
         if isMock {
@@ -424,24 +443,19 @@ public final class VPNManager {
 
     /// Live throughput: Packet Tunnel counters plus in-app mixed-port.
     /// Mixed-port is polled even when the tunnel is down (System Proxy only).
-    ///
-    /// macOS system-extension sessions often return empty `sendProviderMessage`
-    /// replies while the tunnel is still forwarding. The extension dumps a
-    /// snapshot into the kit; the host reads that file. iOS keeps IPC.
+    /// Channel is chosen by the host app (`Configuration.metricsChannel`).
     public func fetchMetrics() async -> VPNMetrics {
         if isMock {
             return status == .connected ? nextMockMetrics() : .zero
         }
         let local = localMetricsProvider?() ?? .zero
         guard status == .connected else { return local }
-        #if os(macOS)
-        // Do not fall through to sendProviderMessage: on a system extension
-        // the reply often never arrives and the 1s poller hangs at zero.
-        if let file = TunnelMetricsStore.load() {
-            return file.merging(local)
+        if configuration.metricsChannel == .kitFile {
+            if let file = TunnelMetricsStore.load() {
+                return file.merging(local)
+            }
+            return local
         }
-        return local
-        #else
         guard let session = tunnelManager?.connection as? NETunnelProviderSession else {
             return local
         }
@@ -469,7 +483,6 @@ public final class VPNManager {
             // Provider may not have registered IPC yet; keep mixed-port alive.
             return local
         }
-        #endif
     }
 
     /// Notifies a running tunnel that the selected outbound changed.
