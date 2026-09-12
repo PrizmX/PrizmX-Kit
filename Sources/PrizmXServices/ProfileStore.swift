@@ -208,6 +208,7 @@ public final class ProfileStore {
         profiles[index].rawConfig = text
         profiles[index].format = ProxyProfile.inferredFormat(for: text)
         profiles[index].lastUpdated = Date()
+        profiles[index].applySubscriptionUserInfo(from: response)
         try persist()
         if activeProfileID == id {
             rebuildCatalogIfNeeded()
@@ -277,6 +278,9 @@ public final class ProfileStore {
                     selectedNodeID: record.selectedNodeID,
                     selectedGroupName: record.selectedGroupName,
                     lastUpdated: record.lastUpdated,
+                    usedBytes: record.usedBytes,
+                    totalBytes: record.totalBytes,
+                    expiresAt: record.expiresAt,
                     rawConfig: raw
                 )
             )
@@ -301,6 +305,9 @@ public final class ProfileStore {
                 selectedNodeID: profile.selectedNodeID,
                 selectedGroupName: profile.selectedGroupName,
                 lastUpdated: profile.lastUpdated,
+                usedBytes: profile.usedBytes,
+                totalBytes: profile.totalBytes,
+                expiresAt: profile.expiresAt,
                 isActive: profile.id == activeProfileID
             )
         }

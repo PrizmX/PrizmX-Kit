@@ -180,3 +180,19 @@ func profileOverlayMergesInFrontOfBodyRules() throws {
     #expect(store.rules.first?.displayPolicy == "DIRECT")
     #expect(store.overlay.rules.count == 1)
 }
+
+@Test
+func subscriptionQuotaParsesClashUserinfo() {
+    let quota = SubscriptionQuota.parse(
+        "upload=1024; download=2048; total=10737418240; expire=1893456000"
+    )
+    #expect(quota?.usedBytes == 3072)
+    #expect(quota?.totalBytes == 10_737_418_240)
+    #expect(quota?.expiresAt == Date(timeIntervalSince1970: 1_893_456_000))
+}
+
+@Test
+func subscriptionQuotaIgnoresEmptyHeader() {
+    #expect(SubscriptionQuota.parse("") == nil)
+    #expect(SubscriptionQuota.parse("profile-update-interval=24") == nil)
+}

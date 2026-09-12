@@ -673,7 +673,7 @@ public struct ProfileCard<Accessory: View>: View {
                 } else {
                     WidgetSplitValue(value: "None")
                     Spacer(minLength: 0)
-                    WidgetQuietEmpty(text: "Add a profile from More → Profiles")
+                    WidgetQuietEmpty(text: "Create or import a profile in Profiles")
                 }
             }
         }

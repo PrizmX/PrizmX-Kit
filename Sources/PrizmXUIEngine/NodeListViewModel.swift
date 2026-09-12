@@ -22,12 +22,20 @@ public struct PolicyMember: Identifiable, Sendable, Hashable {
     public var name: String
     public var kindLabel: String
     public var node: OutboundNode?
+    public var isUnsupported: Bool
 
-    public init(id: String, name: String, kindLabel: String, node: OutboundNode? = nil) {
+    public init(
+        id: String,
+        name: String,
+        kindLabel: String,
+        node: OutboundNode? = nil,
+        isUnsupported: Bool = false
+    ) {
         self.id = id
         self.name = name
         self.kindLabel = kindLabel
         self.node = node
+        self.isUnsupported = isUnsupported
     }
 }
 
@@ -100,7 +108,12 @@ public final class NodeListViewModel {
 
     private static func policyMember(_ id: String, manager: NodeManager) -> PolicyMember {
         if let node = manager.nodesByID[id] {
-            return PolicyMember(id: id, name: node.name, kindLabel: "Node", node: node)
+            return PolicyMember(
+                id: id,
+                name: node.name,
+                kindLabel: "Node (\(Self.protocolLabel(node.protocolConfig)))",
+                node: node
+            )
         }
         if manager.groupsByName[id] != nil {
             return PolicyMember(id: id, name: id, kindLabel: "Group")
@@ -111,7 +124,17 @@ public final class NodeListViewModel {
         case "REJECT", "REJECT-DROP":
             return PolicyMember(id: id, name: id, kindLabel: "REJECT")
         default:
-            return PolicyMember(id: id, name: id, kindLabel: "Policy")
+            return PolicyMember(id: id, name: id, kindLabel: "Unsupported", isUnsupported: true)
+        }
+    }
+
+    private static func protocolLabel(_ config: ProtocolConfig) -> String {
+        switch config {
+        case .shadowsocks: "SS"
+        case .vless: "VLESS"
+        case .trojan: "Trojan"
+        case .anytls: "AnyTLS"
+        case .direct: "Direct"
         }
     }
 
