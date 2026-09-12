@@ -42,6 +42,8 @@ public final class ProfileStore {
     public private(set) var rules: [RouteRule] = []
     /// Overlay owned by the active profile (empty when none).
     public private(set) var overlay: ProfileOverlay = .empty
+    /// Group names from the profile body, before overlay overrides.
+    public private(set) var profileGroupNames: Set<String> = []
     public private(set) var lastError: String?
     @ObservationIgnored
     private var overlaysByID: [UUID: ProfileOverlay] = [:]
@@ -228,11 +230,14 @@ public final class ProfileStore {
             nodeManager = nil
             rules = []
             overlay = .empty
+            profileGroupNames = []
             return
         }
         overlay = loadOverlay(for: active.id)
         do {
-            let parsed = try ConfigAdapter.parse(rawString: active.rawConfig, overlay: overlay)
+            let body = try ConfigAdapter.parse(rawString: active.rawConfig)
+            profileGroupNames = Set(body.1.groupsByName.keys)
+            let parsed = try overlay.apply(to: body)
             rules = parsed.0.rules
             parsed.1.applySelections(PolicySelectionStore.load())
             nodeManager = parsed.1
@@ -240,6 +245,7 @@ public final class ProfileStore {
         } catch {
             nodeManager = nil
             rules = []
+            profileGroupNames = []
             lastError = error.localizedDescription
         }
     }
@@ -253,6 +259,7 @@ public final class ProfileStore {
             activeProfileID = nil
             nodeManager = nil
             rules = []
+            profileGroupNames = []
             return
         }
 
