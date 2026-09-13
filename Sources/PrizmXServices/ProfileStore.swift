@@ -372,7 +372,7 @@ public final class ProfileStore {
 
     /// Accepts plain YAML/JSON or a base64-wrapped subscription body.
     /// Anything else (error pages, HTML) returns nil instead of being saved.
-    public static func decodeSubscriptionBody(_ data: Data) -> String? {
+    nonisolated public static func decodeSubscriptionBody(_ data: Data) -> String? {
         guard let text = String(data: data, encoding: .utf8) else { return nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -386,13 +386,28 @@ public final class ProfileStore {
         return looksLikeConfig(innerTrimmed) ? innerTrimmed : nil
     }
 
-    private static func looksLikeConfig(_ text: String) -> Bool {
-        let head = text.prefix(64).lowercased()
-        return head.contains("proxies")
-            || head.contains("outbounds")
-            || head.contains("proxy-groups")
-            || text.first == "{"
-            || text.first == "["
+    nonisolated private static func looksLikeConfig(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first else { return false }
+        if first == "<" {
+            let leading = trimmed.prefix(256).lowercased()
+            if leading.hasPrefix("<!doctype") || leading.hasPrefix("<html") || leading.hasPrefix("<?xml") {
+                return false
+            }
+        }
+        if first == "{" || first == "[" { return true }
+
+        // Clash YAML often starts with mixed-port / dns / comments, so `proxies:`
+        // can sit well past a short header window.
+        let sample = trimmed.prefix(16_384).lowercased()
+        return sample.contains("proxies:")
+            || sample.contains("proxy-groups:")
+            || sample.contains("proxy-providers:")
+            || sample.contains("outbounds:")
+            || sample.contains("rules:")
+            || sample.contains("rule-providers:")
+            || sample.contains("mixed-port:")
+            || sample.contains("socks-port:")
     }
 }
 

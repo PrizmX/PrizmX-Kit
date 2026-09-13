@@ -196,3 +196,39 @@ func subscriptionQuotaIgnoresEmptyHeader() {
     #expect(SubscriptionQuota.parse("") == nil)
     #expect(SubscriptionQuota.parse("profile-update-interval=24") == nil)
 }
+
+@Test
+func decodeSubscriptionAcceptsClashStartingWithMixedPort() {
+    let yaml = """
+    mixed-port: 7890
+    allow-lan: false
+    ipv6: false
+    mode: rule
+    log-level: info
+    dns:
+      enable: true
+      nameserver:
+        - 223.5.5.5
+    proxies: []
+    rules:
+      - MATCH,DIRECT
+    """
+    #expect(!yaml.prefix(64).contains("proxies"))
+    let decoded = ProfileStore.decodeSubscriptionBody(Data(yaml.utf8))
+    #expect(decoded?.contains("mixed-port: 7890") == true)
+    #expect(decoded?.contains("proxies:") == true)
+}
+
+@Test
+func decodeSubscriptionRejectsHTMLErrorPage() {
+    let html = "<!DOCTYPE html><html><body>proxies: not a config</body></html>"
+    #expect(ProfileStore.decodeSubscriptionBody(Data(html.utf8)) == nil)
+}
+
+@Test
+func decodeSubscriptionUnwrapsBase64Clash() {
+    let yaml = "proxies: []\nproxy-groups: []\nrules:\n  - MATCH,DIRECT\n"
+    let encoded = Data(yaml.utf8).base64EncodedString()
+    let decoded = ProfileStore.decodeSubscriptionBody(Data(encoded.utf8))
+    #expect(decoded?.contains("proxies:") == true)
+}
