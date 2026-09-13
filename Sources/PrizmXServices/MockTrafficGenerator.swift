@@ -50,7 +50,8 @@ public enum MockTrafficGenerator: Sendable {
                 uplinkBytes: 4_200,
                 downlinkBytes: 88_000,
                 closed: false,
-                attribution: safari
+                attribution: safari,
+                serial: 1
             ),
             FlowRecord(
                 startedAt: date.addingTimeInterval(-3),
@@ -59,7 +60,8 @@ public enum MockTrafficGenerator: Sendable {
                 uplinkBytes: 1_100,
                 downlinkBytes: 22_000,
                 closed: false,
-                attribution: music
+                attribution: music,
+                serial: 2
             )
         ]
     }
@@ -74,7 +76,8 @@ public enum MockTrafficGenerator: Sendable {
             milliseconds: 1_800,
             clientEnd: "eof",
             remoteEnd: "eof",
-            closed: true
+            closed: true,
+            serial: 3
         )
     }
 
