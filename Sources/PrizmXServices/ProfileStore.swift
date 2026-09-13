@@ -44,6 +44,8 @@ public final class ProfileStore {
     public private(set) var overlay: ProfileOverlay = .empty
     /// Group names from the profile body, before overlay overrides.
     public private(set) var profileGroupNames: Set<String> = []
+    /// Persisted group → member choices. Tracked so Policies repaints on change.
+    public private(set) var policySelections: [String: String]
     public private(set) var lastError: String?
     @ObservationIgnored
     private var overlaysByID: [UUID: ProfileOverlay] = [:]
@@ -87,6 +89,7 @@ public final class ProfileStore {
         self.configuration = configuration
         self.fileManager = fileManager
         self.storage = storage
+        policySelections = storage == .disk ? PolicySelectionStore.load() : [:]
         guard storage == .disk else { return }
         do {
             try loadFromDisk()
@@ -147,11 +150,8 @@ public final class ProfileStore {
         rebuildCatalogIfNeeded()
     }
 
-    public func policySelections() -> [String: String] {
-        PolicySelectionStore.load()
-    }
-
     public func setPolicySelection(_ memberID: String, inGroup groupName: String) {
+        policySelections[groupName] = memberID
         PolicySelectionStore.set(memberID, inGroup: groupName)
     }
 

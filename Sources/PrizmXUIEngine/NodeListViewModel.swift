@@ -84,7 +84,7 @@ public final class NodeListViewModel {
     /// Currently chosen member (node, nested group, or DIRECT) in `groupName`.
     /// Reads the persisted Policies selection, then the catalog default.
     public func selectedMemberID(inGroup groupName: String) -> String? {
-        if let persisted = profiles.policySelections()[groupName] { return persisted }
+        if let persisted = profiles.policySelections[groupName] { return persisted }
         return profiles.nodeManager?.selectedMemberID(inGroup: groupName)
     }
 
