@@ -633,10 +633,18 @@ extension VPNManager {
     }
 
     fileprivate func apply(metrics: VPNMetrics) {
-        lastMetrics = metrics
-        uploadBytesPerSecond = metrics.uploadBytesPerSecond
-        downloadBytesPerSecond = metrics.downloadBytesPerSecond
-        activeConnections = metrics.activeConnections
+        if lastMetrics != metrics {
+            lastMetrics = metrics
+        }
+        if uploadBytesPerSecond != metrics.uploadBytesPerSecond {
+            uploadBytesPerSecond = metrics.uploadBytesPerSecond
+        }
+        if downloadBytesPerSecond != metrics.downloadBytesPerSecond {
+            downloadBytesPerSecond = metrics.downloadBytesPerSecond
+        }
+        if activeConnections != metrics.activeConnections {
+            activeConnections = metrics.activeConnections
+        }
     }
 
     fileprivate func resetThroughput() {

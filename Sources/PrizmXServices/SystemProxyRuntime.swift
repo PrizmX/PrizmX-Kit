@@ -3,6 +3,9 @@ import os
 import PrizmXConfig
 import PrizmXCore
 import PrizmXProtocols
+#if canImport(PrizmXAttribution)
+import PrizmXAttribution
+#endif
 
 #if os(macOS)
 
@@ -19,11 +22,12 @@ public final class SystemProxyRuntime: @unchecked Sendable {
         var configText: String
         var overlayBlob: Data
         var allowLAN: Bool
+        var listen: InboundListenConfig
     }
 
     private struct State {
         var engine: Engine?
-        var server: MixedPortServer?
+        var servers: [MixedPortServer] = []
         var signature: Signature?
         /// Serializes `apply`: concurrent calls (e.g. rapid config switching)
         /// would otherwise each start a server, and last-writer-wins state
@@ -32,18 +36,25 @@ public final class SystemProxyRuntime: @unchecked Sendable {
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
+    #if canImport(PrizmXAttribution)
+    private let flowAttributor: (any FlowAttributing)? = ProcessFlowAttributor()
+    #else
+    private let flowAttributor: (any FlowAttributing)? = nil
+    #endif
 
     public init() {}
 
     public func apply(
         configText: String,
         overlay: ProfileOverlay,
-        allowLAN: Bool
+        allowLAN: Bool,
+        setSystemProxy: Bool
     ) async throws {
         let signature = Signature(
             configText: configText,
             overlayBlob: (try? JSONEncoder().encode(overlay)) ?? Data(),
-            allowLAN: allowLAN
+            allowLAN: allowLAN,
+            listen: InboundListenConfig.parse(from: configText)
         )
         let task: Task<Void, Error> = state.withLock { current in
             let previous = current.applyChain
@@ -54,6 +65,7 @@ public final class SystemProxyRuntime: @unchecked Sendable {
                     configText: configText,
                     overlay: overlay,
                     allowLAN: allowLAN,
+                    setSystemProxy: setSystemProxy,
                     signature: signature
                 )
             }
@@ -67,13 +79,14 @@ public final class SystemProxyRuntime: @unchecked Sendable {
         configText: String,
         overlay: ProfileOverlay,
         allowLAN: Bool,
+        setSystemProxy: Bool,
         signature: Signature
     ) async throws {
         let alreadyRunning = state.withLock {
-            $0.signature == signature && $0.server != nil
+            $0.signature == signature && !$0.servers.isEmpty
         }
         if alreadyRunning {
-            SystemProxyConfigurator.apply()
+            Self.applySystemProxy(setSystemProxy, listen: signature.listen)
             return
         }
         try await startServer(
@@ -82,7 +95,20 @@ public final class SystemProxyRuntime: @unchecked Sendable {
             allowLAN: allowLAN,
             signature: signature
         )
-        SystemProxyConfigurator.apply()
+        Self.applySystemProxy(setSystemProxy, listen: signature.listen)
+    }
+
+    /// System proxy always targets loopback, even when inbound binds 0.0.0.0.
+    private static func applySystemProxy(_ on: Bool, listen: InboundListenConfig) {
+        if on {
+            SystemProxyConfigurator.apply(
+                host: "127.0.0.1",
+                httpPort: Int(listen.systemProxyHTTPPort),
+                socksPort: Int(listen.systemProxySOCKSPort)
+            )
+        } else {
+            SystemProxyConfigurator.restore()
+        }
     }
 
     public func shutdown() {
@@ -139,30 +165,43 @@ public final class SystemProxyRuntime: @unchecked Sendable {
             systemDNS: capturedDNS,
             pinnedNodeAddresses: NodeAddressStore.load(),
             overlay: overlay,
+            flowAttributor: flowAttributor,
             dnsPersistenceURL: nil
         )
         engine.startURLTest()
-        let server = MixedPortServer(
-            engine: engine,
-            port: UInt16(clamping: TunnelProviderKeys.defaultMixedPort),
-            allowLAN: allowLAN
-        )
-        try await server.start()
+        var started: [MixedPortServer] = []
+        do {
+            for socket in signature.listen.sockets {
+                let server = MixedPortServer(
+                    engine: engine,
+                    port: socket.port,
+                    allowLAN: allowLAN,
+                    accept: socket.accept
+                )
+                try await server.start()
+                started.append(server)
+            }
+        } catch {
+            started.forEach { $0.stop() }
+            engine.stopURLTest()
+            throw error
+        }
+        let servers = started
         state.withLock {
             $0.engine = engine
-            $0.server = server
+            $0.servers = servers
             $0.signature = signature
         }
-        TunnelLog.write(.info, "system proxy mixed-port ready")
+        TunnelLog.write(.info, "inbound ready lan=\(allowLAN)")
     }
 
     private func stopServer() {
-        let snapshot = state.withLock { current -> (MixedPortServer?, Engine?) in
-            let pair = (current.server, current.engine)
+        let snapshot = state.withLock { current -> ([MixedPortServer], Engine?) in
+            let pair = (current.servers, current.engine)
             current = State()
             return pair
         }
-        snapshot.0?.stop()
+        snapshot.0.forEach { $0.stop() }
         snapshot.1?.stopURLTest()
     }
 }
@@ -175,11 +214,13 @@ public final class SystemProxyRuntime: @unchecked Sendable {
     public func apply(
         configText: String,
         overlay: ProfileOverlay,
-        allowLAN: Bool
+        allowLAN: Bool,
+        setSystemProxy: Bool
     ) async throws {
         _ = configText
         _ = overlay
         _ = allowLAN
+        _ = setSystemProxy
     }
 
     public func shutdown() {}

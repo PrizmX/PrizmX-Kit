@@ -146,16 +146,6 @@ public enum WidgetChrome {
     }
     #endif
 
-    /// Canvas behind Home cards. System Settings light: white window with
-    /// 248-gray groups; dark keeps the system window background.
-    public static var page: Color {
-        #if os(macOS)
-        adaptive(dark: .windowBackgroundColor, light: .white)
-        #else
-        Color(uiColor: .systemBackground)
-        #endif
-    }
-
     /// Group fill measured from System Settings: 248 gray on the white
     /// window in light; sRGB 40/40/40 lift on the dark window.
     public static var fill: Color {

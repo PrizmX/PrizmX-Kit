@@ -574,22 +574,25 @@ enum TakeoverLayout {
 
 // MARK: - LAN
 
-/// Allow LAN summary: listen address, mixed-port, client count (later).
+/// Allow LAN summary: listen address, HTTP/SOCKS ports, client count.
 public struct LANCard: View {
     @Binding public var isOn: Bool
     public var address: String
-    public var port: Int
+    public var httpPort: Int
+    public var socksPort: Int
     public var deviceCount: Int
 
     public init(
         isOn: Binding<Bool>,
         address: String,
-        port: Int,
+        httpPort: Int,
+        socksPort: Int,
         deviceCount: Int = 0
     ) {
         self._isOn = isOn
         self.address = address
-        self.port = port
+        self.httpPort = httpPort
+        self.socksPort = socksPort
         self.deviceCount = deviceCount
     }
 
@@ -610,7 +613,8 @@ public struct LANCard: View {
                 WidgetSplitValue(value: address)
                 Spacer(minLength: 0)
                 WidgetFootRow(items: [
-                    ("Port", "\(port)"),
+                    ("HTTP/HTTPS", "\(httpPort)"),
+                    ("SOCKS", "\(socksPort)"),
                     ("Devices", "\(deviceCount)")
                 ])
             }

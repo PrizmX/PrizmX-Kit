@@ -25,7 +25,15 @@ public enum SystemProxyConfigurator {
     }
 
     public static func apply(host: String = "127.0.0.1", port: Int = TunnelProviderKeys.defaultMixedPort) {
-        let endpoint = "\(host):\(port)"
+        apply(host: host, httpPort: port, socksPort: port)
+    }
+
+    public static func apply(
+        host: String = "127.0.0.1",
+        httpPort: Int,
+        socksPort: Int
+    ) {
+        let endpoint = "\(host):\(httpPort)/\(socksPort)"
         box.lock.lock()
         defer { box.lock.unlock() }
         if UserDefaults.standard.bool(forKey: appliedKey),
@@ -36,13 +44,13 @@ public enum SystemProxyConfigurator {
             var next = current
             next[kSCPropNetProxiesHTTPEnable as String] = 1
             next[kSCPropNetProxiesHTTPProxy as String] = host
-            next[kSCPropNetProxiesHTTPPort as String] = port
+            next[kSCPropNetProxiesHTTPPort as String] = httpPort
             next[kSCPropNetProxiesHTTPSEnable as String] = 1
             next[kSCPropNetProxiesHTTPSProxy as String] = host
-            next[kSCPropNetProxiesHTTPSPort as String] = port
+            next[kSCPropNetProxiesHTTPSPort as String] = httpPort
             next[kSCPropNetProxiesSOCKSEnable as String] = 1
             next[kSCPropNetProxiesSOCKSProxy as String] = host
-            next[kSCPropNetProxiesSOCKSPort as String] = port
+            next[kSCPropNetProxiesSOCKSPort as String] = socksPort
             next[kSCPropNetProxiesExcludeSimpleHostnames as String] = 1
             next[kSCPropNetProxiesProxyAutoConfigEnable as String] = 0
             next[kSCPropNetProxiesExceptionsList as String] = [
