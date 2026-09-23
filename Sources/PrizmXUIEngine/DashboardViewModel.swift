@@ -17,6 +17,11 @@ public final class DashboardViewModel {
     private var history: SpeedHistoryBuffer
     @ObservationIgnored
     nonisolated(unsafe) private var historyTask: Task<Void, Never>?
+    /// When false, sampling still fills the ring buffer but the observable
+    /// `speedHistory` array stays untouched, so hidden windows don't churn
+    /// SwiftUI layout. The host app toggles this with UI visibility.
+    @ObservationIgnored
+    private var publishesSpeedHistory = true
 
     public init(
         vpn: VPNManager,
@@ -96,6 +101,16 @@ public final class DashboardViewModel {
         }
     }
 
+    /// Pauses observable chart updates while every surface is hidden; the
+    /// buffer keeps recording and is republished wholesale on resume.
+    public func setSpeedHistoryPublishing(_ active: Bool) {
+        guard active != publishesSpeedHistory else { return }
+        publishesSpeedHistory = active
+        if active {
+            speedHistory = history.points
+        }
+    }
+
     private func startHistorySampling() {
         historyTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -105,7 +120,9 @@ public final class DashboardViewModel {
                     uploadBytesPerSecond: self.vpn.uploadBytesPerSecond,
                     downloadBytesPerSecond: self.vpn.downloadBytesPerSecond
                 )
-                self.speedHistory = self.history.points
+                if self.publishesSpeedHistory {
+                    self.speedHistory = self.history.points
+                }
             }
         }
     }
