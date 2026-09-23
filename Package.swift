@@ -37,6 +37,7 @@ let package = Package(
                 .product(name: "PrizmXNodes", package: "PrizmX-Foundation"),
                 .product(name: "PrizmXProtocols", package: "PrizmX-Foundation"),
                 .product(name: "PrizmXRules", package: "PrizmX-Foundation"),
+                .product(name: "PrizmXScripts", package: "PrizmX-Foundation"),
                 .product(
                     name: "PrizmXAttribution",
                     package: "PrizmX-Foundation",

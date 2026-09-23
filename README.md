@@ -18,7 +18,7 @@ SwiftTCP/              required by Foundation
 
 | Product | Role |
 | --- | --- |
-| `PrizmXServices` | `VPNManager`, profiles, mixed-port / system proxy, node ping, traffic ledger |
+| `PrizmXServices` | `VPNManager`, profiles, mixed-port / system proxy, node ping, traffic ledger, Scripts runtime |
 | `PrizmXUIEngine` | Observation view models |
 | `PrizmXUIComponents` | SwiftUI Home widgets and shared chrome |
 

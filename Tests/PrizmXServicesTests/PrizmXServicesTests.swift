@@ -232,3 +232,30 @@ func decodeSubscriptionUnwrapsBase64Clash() {
     let decoded = ProfileStore.decodeSubscriptionBody(Data(encoded.utf8))
     #expect(decoded?.contains("proxies:") == true)
 }
+
+@MainActor
+@Test
+func scriptStoreMemoryRoundTrip() throws {
+    let store = ScriptStore(storage: .memory)
+    var script = ScriptRecord(name: "Rewrite", source: "$done({})")
+    try store.upsert(script)
+    #expect(store.scripts.count == 1)
+    script.name = "Ads"
+    script.enabled = false
+    try store.upsert(script)
+    #expect(store.scripts.first?.name == "Ads")
+    #expect(store.scripts.first?.enabled == false)
+    store.setEnabled(true, id: script.id)
+    #expect(store.scripts.first?.enabled == true)
+    try store.remove(id: script.id)
+    #expect(store.scripts.isEmpty)
+}
+
+@MainActor
+@Test
+func scriptStoreRejectsEmptyName() {
+    let store = ScriptStore(storage: .memory)
+    #expect(throws: ScriptStoreError.emptyName) {
+        try store.upsert(ScriptRecord(name: "  ", source: "1"))
+    }
+}

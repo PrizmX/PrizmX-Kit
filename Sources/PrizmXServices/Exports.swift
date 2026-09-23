@@ -5,3 +5,4 @@
 @_exported import PrizmXNodes
 @_exported import PrizmXProtocols
 @_exported import PrizmXRules
+@_exported import PrizmXScripts
