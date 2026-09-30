@@ -14,13 +14,28 @@ public final class ProfileStore {
         public var appGroupIdentifier: String
         /// Folder name inside the App Group container.
         public var directoryName: String
+        /// Overrides the App Group container (tests, tools).
+        public var rootDirectory: URL?
 
         public init(
             appGroupIdentifier: String = PrizmXAppGroup.identifier,
-            directoryName: String = "PrizmXKit"
+            directoryName: String = "PrizmXKit",
+            rootDirectory: URL? = nil
         ) {
             self.appGroupIdentifier = appGroupIdentifier
             self.directoryName = directoryName
+            self.rootDirectory = rootDirectory
+        }
+
+        /// Kit folder: `rootDirectory` or `<App Group>/<directoryName>`.
+        func resolvedRoot(fileManager: FileManager) -> URL {
+            if let rootDirectory { return rootDirectory }
+            guard let container = fileManager.containerURL(
+                forSecurityApplicationGroupIdentifier: appGroupIdentifier
+            ) else {
+                preconditionFailure("App Group '\(appGroupIdentifier)' is unavailable")
+            }
+            return container.appendingPathComponent(directoryName, isDirectory: true)
         }
 
         public static let `default` = Configuration()
@@ -49,6 +64,10 @@ public final class ProfileStore {
     public private(set) var lastError: String?
     @ObservationIgnored
     private var overlaysByID: [UUID: ProfileOverlay] = [:]
+    /// Set when index.json was unreadable and could not be backed up:
+    /// writes stay blocked so the original is never overwritten.
+    @ObservationIgnored
+    private var unreadableIndex: StoreFileBackup.LoadError?
 
     /// Records an error for the profile UI to surface. Hosts use this when
     /// they catch a throwing mutation (`saveOverlay`, `upsert`, …).
@@ -113,7 +132,7 @@ public final class ProfileStore {
         if makeActive || activeProfileID == nil {
             activeProfileID = next.id
         }
-        try persist()
+        try persist(configFor: next)
         rebuildCatalogIfNeeded()
     }
 
@@ -188,33 +207,91 @@ public final class ProfileStore {
         }
     }
 
-    /// Downloads a subscription URL and replaces that profile's raw config.
-    public func refreshSubscription(id: UUID) async throws {
-        guard let index = profiles.firstIndex(where: { $0.id == id }) else {
-            throw ProfileStoreError.unknownProfile
-        }
-        guard let url = profiles[index].subscriptionURL else {
-            throw ProfileStoreError.missingSubscriptionURL
-        }
+    /// Largest subscription body accepted; anything bigger is not a profile.
+    nonisolated public static let maxSubscriptionBytes = 10 * 1024 * 1024
 
-        var request = URLRequest(url: url, timeoutInterval: 30)
-        request.setValue("PrizmX/1.0", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw ProfileStoreError.subscriptionFailed(http.statusCode)
+    /// Downloads a subscription URL and replaces that profile's raw config.
+    /// The previous config stays in place unless the download parses.
+    /// Failures are also recorded in `lastError`.
+    public func refreshSubscription(id: UUID) async throws {
+        do {
+            try await performSubscriptionRefresh(id: id)
+        } catch {
+            lastError = error.localizedDescription
+            throw error
         }
+    }
+
+    private func performSubscriptionRefresh(id: UUID) async throws {
+        guard let url = profiles.first(where: { $0.id == id })?.subscriptionURL else {
+            throw profiles.contains(where: { $0.id == id })
+                ? ProfileStoreError.missingSubscriptionURL
+                : ProfileStoreError.unknownProfile
+        }
+        let (data, response) = try await Self.downloadSubscription(from: url)
         guard let text = Self.decodeSubscriptionBody(data) else {
             throw ProfileStoreError.unreadableSubscription
         }
+        // The parser skips malformed entries, so also refuse a body that
+        // yields nothing usable instead of wiping a working profile.
+        let parsed: (Router, NodeManager)
+        do {
+            parsed = try ConfigAdapter.parse(rawString: text)
+        } catch {
+            throw ProfileStoreError.invalidSubscription(error.localizedDescription)
+        }
+        if parsed.0.rules.isEmpty, parsed.1.nodesByID.isEmpty {
+            throw ProfileStoreError.invalidSubscription("no proxies or rules")
+        }
 
-        profiles[index].rawConfig = text
-        profiles[index].format = ProxyProfile.inferredFormat(for: text)
-        profiles[index].lastUpdated = Date()
-        profiles[index].applySubscriptionUserInfo(from: response)
-        try persist()
+        // The profile list may have changed while downloading.
+        guard let index = profiles.firstIndex(where: { $0.id == id }) else {
+            throw ProfileStoreError.unknownProfile
+        }
+        var next = profiles[index]
+        next.rawConfig = text
+        next.format = ProxyProfile.inferredFormat(for: text)
+        next.lastUpdated = Date()
+        next.applySubscriptionUserInfo(from: response)
+        let previous = profiles[index]
+        profiles[index] = next
+        do {
+            try persist(configFor: next)
+        } catch {
+            if let restore = profiles.firstIndex(where: { $0.id == id }) {
+                profiles[restore] = previous
+            }
+            throw error
+        }
         if activeProfileID == id {
             rebuildCatalogIfNeeded()
         }
+    }
+
+    /// Streams the body so an oversized response is cut off early.
+    nonisolated private static func downloadSubscription(
+        from url: URL
+    ) async throws -> (Data, URLResponse) {
+        var request = URLRequest(url: url, timeoutInterval: 30)
+        request.setValue("PrizmX/1.0", forHTTPHeaderField: "User-Agent")
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw ProfileStoreError.subscriptionFailed(http.statusCode)
+        }
+        if response.expectedContentLength > Int64(maxSubscriptionBytes) {
+            throw ProfileStoreError.subscriptionTooLarge
+        }
+        var data = Data()
+        if response.expectedContentLength > 0 {
+            data.reserveCapacity(Int(response.expectedContentLength))
+        }
+        for try await byte in bytes {
+            data.append(byte)
+            if data.count > maxSubscriptionBytes {
+                throw ProfileStoreError.subscriptionTooLarge
+            }
+        }
+        return (data, response)
     }
 
     // MARK: - Disk
@@ -263,10 +340,21 @@ public final class ProfileStore {
             return
         }
 
-        let data = try Data(contentsOf: indexURL)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let index = try decoder.decode(ProfileIndexFile.self, from: data)
+        let index: ProfileIndexFile
+        do {
+            let data = try Data(contentsOf: indexURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            index = try decoder.decode(ProfileIndexFile.self, from: data)
+        } catch {
+            // A later persist() would overwrite the unreadable index and
+            // orphan every profile. Keep a copy the user can recover.
+            let backup = StoreFileBackup.preserve(indexURL, fileManager: fileManager)
+            let failure = StoreFileBackup.LoadError(file: "index.json", backup: backup, underlying: error)
+            unreadableIndex = backup == nil ? failure : nil
+            throw failure
+        }
+        unreadableIndex = nil
         var loaded: [ProxyProfile] = []
         loaded.reserveCapacity(index.profiles.count)
         for record in index.profiles {
@@ -297,8 +385,12 @@ public final class ProfileStore {
         rebuildCatalogIfNeeded()
     }
 
-    private func persist() throws {
+    /// Writes the index, plus `profile`'s config when its body changed.
+    /// Other configs are left alone: rewriting them would clobber external
+    /// edits, or blank a file that failed to load.
+    private func persist(configFor profile: ProxyProfile? = nil) throws {
         guard storage == .disk else { return }
+        if let unreadableIndex { throw unreadableIndex }
         try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: configsURL, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: overlaysURL, withIntermediateDirectories: true)
@@ -322,20 +414,14 @@ public final class ProfileStore {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(index).write(to: indexURL, options: .atomic)
-
-        for profile in profiles {
+        if let profile {
             try profile.rawConfig.write(to: configURL(for: profile.id), atomically: true, encoding: .utf8)
         }
+        try encoder.encode(index).write(to: indexURL, options: .atomic)
     }
 
     private var rootURL: URL {
-        guard let container = fileManager.containerURL(
-            forSecurityApplicationGroupIdentifier: configuration.appGroupIdentifier
-        ) else {
-            preconditionFailure("App Group '\(configuration.appGroupIdentifier)' is unavailable")
-        }
-        return container.appendingPathComponent(configuration.directoryName, isDirectory: true)
+        configuration.resolvedRoot(fileManager: fileManager)
     }
 
     private var indexURL: URL {
@@ -417,6 +503,8 @@ public enum ProfileStoreError: Error, Sendable, Equatable, LocalizedError {
     case missingSubscriptionURL
     case unreadableSubscription
     case subscriptionFailed(Int)
+    case subscriptionTooLarge
+    case invalidSubscription(String)
 
     public var errorDescription: String? {
         switch self {
@@ -425,6 +513,48 @@ public enum ProfileStoreError: Error, Sendable, Equatable, LocalizedError {
         case .missingSubscriptionURL: "This profile has no subscription URL."
         case .unreadableSubscription: "The download did not contain a readable profile."
         case .subscriptionFailed(let code): "Subscription download failed (HTTP \(code))."
+        case .subscriptionTooLarge: "The subscription is larger than 10 MB."
+        case .invalidSubscription(let reason): "The subscription could not be parsed: \(reason)"
+        }
+    }
+}
+
+/// Preserves a store file that failed to load before anything overwrites it.
+enum StoreFileBackup {
+    struct LoadError: Error, LocalizedError {
+        var file: String
+        var backup: URL?
+        var underlying: Error
+
+        var errorDescription: String? {
+            let reason = underlying.localizedDescription
+            guard let backup else {
+                return "\(file) could not be read: \(reason)"
+            }
+            return "\(file) could not be read (\(reason)). A copy was saved as \(backup.lastPathComponent)."
+        }
+    }
+
+    /// Copies `url` to `<name>.corrupt-<timestamp>` next to it. Returns nil
+    /// when the copy failed.
+    static func preserve(_ url: URL, fileManager: FileManager) -> URL? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let stamp = formatter.string(from: Date())
+        var backup = url.deletingLastPathComponent()
+            .appendingPathComponent("\(url.lastPathComponent).corrupt-\(stamp)", isDirectory: false)
+        var suffix = 1
+        while fileManager.fileExists(atPath: backup.path) {
+            backup = url.deletingLastPathComponent()
+                .appendingPathComponent("\(url.lastPathComponent).corrupt-\(stamp)-\(suffix)", isDirectory: false)
+            suffix += 1
+        }
+        do {
+            try fileManager.copyItem(at: url, to: backup)
+            return backup
+        } catch {
+            return nil
         }
     }
 }

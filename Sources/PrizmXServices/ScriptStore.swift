@@ -14,6 +14,10 @@ public final class ScriptStore {
 
     public private(set) var scripts: [ScriptRecord] = []
     public private(set) var lastError: String?
+    /// Set when scripts.json was unreadable and could not be backed up:
+    /// writes stay blocked so the original is never overwritten.
+    @ObservationIgnored
+    private var unreadableFile: StoreFileBackup.LoadError?
 
     public let configuration: ProfileStore.Configuration
     public let storage: ProfileStore.StorageKind
@@ -73,15 +77,29 @@ public final class ScriptStore {
             scripts = []
             return
         }
-        let data = try Data(contentsOf: scriptsURL)
-        let file = try JSONDecoder().decode(File.self, from: data)
+        let file: File
+        do {
+            let data = try Data(contentsOf: scriptsURL)
+            file = try JSONDecoder().decode(File.self, from: data)
+        } catch {
+            // Keep a copy before the next persist() replaces it.
+            let backup = StoreFileBackup.preserve(scriptsURL, fileManager: fileManager)
+            let failure = StoreFileBackup.LoadError(file: "scripts.json", backup: backup, underlying: error)
+            unreadableFile = backup == nil ? failure : nil
+            throw failure
+        }
+        unreadableFile = nil
         scripts = file.scripts
         lastError = nil
     }
 
     private func persist() throws {
+        guard storage == .disk else {
+            lastError = nil
+            return
+        }
+        if let unreadableFile { throw unreadableFile }
         lastError = nil
-        guard storage == .disk else { return }
         try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
         let file = File(version: File.currentVersion, scripts: scripts)
         let encoder = JSONEncoder()
@@ -90,12 +108,7 @@ public final class ScriptStore {
     }
 
     private var rootURL: URL {
-        guard let container = fileManager.containerURL(
-            forSecurityApplicationGroupIdentifier: configuration.appGroupIdentifier
-        ) else {
-            preconditionFailure("App Group '\(configuration.appGroupIdentifier)' is unavailable")
-        }
-        return container.appendingPathComponent(configuration.directoryName, isDirectory: true)
+        configuration.resolvedRoot(fileManager: fileManager)
     }
 
     private var scriptsURL: URL {
