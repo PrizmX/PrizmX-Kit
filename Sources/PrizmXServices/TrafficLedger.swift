@@ -9,7 +9,26 @@ import Observation
 @MainActor
 @Observable
 public final class TrafficLedger {
-    private static let defaultsKey = "trafficLedger.v2"
+    /// Legacy home of the ledger; migrated to `fileURL` once, then removed.
+    static let defaultsKey = "trafficLedger.v2"
+    /// Days kept for the day buckets (months keep their own totals).
+    static let retainedDays = 35
+    static let retainedMonths = 24
+    /// Per-day cap for domain / app rankings; trimmed back to this once a
+    /// bucket grows 20% past it.
+    static let maxRankedKeys = 500
+
+    /// Application Support/<bundle id>/TrafficLedger.json.
+    public static var defaultFileURL: URL? {
+        guard let support = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else { return nil }
+        let folder = Bundle.main.bundleIdentifier ?? "PrizmX"
+        return support
+            .appendingPathComponent(folder, isDirectory: true)
+            .appendingPathComponent("TrafficLedger.json", isDirectory: false)
+    }
 
     struct HourBucket: Codable, Equatable {
         var total: UInt64 = 0
@@ -34,6 +53,28 @@ public final class TrafficLedger {
         var policyUDP: [String: UInt64] = [:]
         /// Hour-of-day (0...23) → proxy / direct / total.
         var hours: [Int: HourBucket] = [:]
+
+        /// Keeps the top `limit` domains / apps by bytes and drops their
+        /// per-protocol and name entries along with them.
+        mutating func trimRankings(limit: Int) {
+            if domain.count > limit {
+                let kept = Self.topKeys(domain, limit: limit)
+                domain = domain.filter { kept.contains($0.key) }
+                domainTCP = domainTCP.filter { kept.contains($0.key) }
+                domainUDP = domainUDP.filter { kept.contains($0.key) }
+            }
+            if app.count > limit {
+                let kept = Self.topKeys(app, limit: limit)
+                app = app.filter { kept.contains($0.key) }
+                appTCP = appTCP.filter { kept.contains($0.key) }
+                appUDP = appUDP.filter { kept.contains($0.key) }
+                appNames = appNames.filter { kept.contains($0.key) }
+            }
+        }
+
+        private static func topKeys(_ source: [String: UInt64], limit: Int) -> Set<String> {
+            Set(source.sorted { $0.value > $1.value }.prefix(limit).map(\.key))
+        }
 
         enum CodingKeys: String, CodingKey {
             case totals, policy, domain, app, appNames, hours
@@ -69,18 +110,38 @@ public final class TrafficLedger {
     private var months: [String: TrafficTotals]
     /// Last cumulative snapshot used as the diff baseline.
     private var last: VPNMetrics
+    /// nil keeps the ledger in memory only (previews, tests).
+    private let fileURL: URL?
+    /// Serial so an older snapshot never lands after a newer one.
+    private let writer = DispatchQueue(label: "app.prizmx.traffic-ledger", qos: .utility)
 
-    public init() {
-        if let data = UserDefaults.standard.data(forKey: Self.defaultsKey),
+    public convenience init() {
+        self.init(fileURL: Self.defaultFileURL, defaults: .standard)
+    }
+
+    init(fileURL: URL?, defaults: UserDefaults) {
+        self.fileURL = fileURL
+        days = [:]
+        months = [:]
+        last = .zero
+        guard let fileURL else { return }
+        if let data = try? Data(contentsOf: fileURL),
            let file = try? JSONDecoder().decode(File.self, from: data) {
-            days = file.days
-            months = file.months
-            last = file.last
-        } else {
-            days = [:]
-            months = [:]
-            last = .zero
+            load(file)
+        } else if let data = defaults.data(forKey: Self.defaultsKey),
+                  let file = try? JSONDecoder().decode(File.self, from: data) {
+            load(file)
+            prune(now: .now)
+            if Self.write(file: currentFile(), to: fileURL) {
+                defaults.removeObject(forKey: Self.defaultsKey)
+            }
         }
+    }
+
+    private func load(_ file: File) {
+        days = file.days
+        months = file.months
+        last = file.last
     }
 
     public func totals(for period: TrafficPeriod, now: Date = .now) -> TrafficTotals {
@@ -287,17 +348,64 @@ public final class TrafficLedger {
 
     /// Writes are throttled: ingest runs on a 1s metrics loop and the payload
     /// is the full day/month model, so an interval cap avoids pointless I/O.
+    /// Encoding and the write run off the main actor.
     private func persist() {
         let now = Date()
         guard now.timeIntervalSince(lastPersist) >= 10 else { return }
         lastPersist = now
-        let file = File(days: days, months: months, last: last)
-        if let data = try? JSONEncoder().encode(file) {
-            UserDefaults.standard.set(data, forKey: Self.defaultsKey)
+        prune(now: now)
+        guard let fileURL else { return }
+        let file = currentFile()
+        writer.async {
+            Self.write(file: file, to: fileURL)
         }
     }
 
-    private static func dayKey(_ date: Date) -> String {
+    /// Flow lists are UI state, not part of the diff baseline.
+    private func currentFile() -> File {
+        var baseline = last
+        baseline.activeFlows = []
+        baseline.recentFlows = []
+        return File(days: days, months: months, last: baseline)
+    }
+
+    @discardableResult
+    nonisolated private static func write(file: File, to url: URL) -> Bool {
+        do {
+            let data = try JSONEncoder().encode(file)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Drops day buckets past the retention window and trims the long tail
+    /// of per-day domain / app keys.
+    func prune(now: Date) {
+        let calendar = Calendar.current
+        if let cutoff = calendar.date(byAdding: .day, value: -Self.retainedDays, to: now) {
+            let oldestDay = Self.dayKey(cutoff)
+            // yyyy-MM-dd keys sort chronologically.
+            days = days.filter { $0.key >= oldestDay }
+        }
+        if let cutoff = calendar.date(byAdding: .month, value: -Self.retainedMonths, to: now) {
+            let oldestMonth = Self.monthKey(cutoff)
+            months = months.filter { $0.key >= oldestMonth }
+        }
+        let threshold = Self.maxRankedKeys + Self.maxRankedKeys / 5
+        for (key, bucket) in days where bucket.domain.count > threshold || bucket.app.count > threshold {
+            var trimmed = bucket
+            trimmed.trimRankings(limit: Self.maxRankedKeys)
+            days[key] = trimmed
+        }
+    }
+
+    static func dayKey(_ date: Date) -> String {
         formatter.string(from: date)
     }
 
@@ -313,7 +421,7 @@ public final class TrafficLedger {
         return formatter
     }()
 
-    private struct File: Codable {
+    struct File: Codable {
         var days: [String: DayBucket]
         var months: [String: TrafficTotals]
         var last: VPNMetrics
@@ -323,7 +431,7 @@ public final class TrafficLedger {
 extension TrafficLedger {
     /// Seeded buckets so Home previews show a populated Ranking card.
     public static var preview: TrafficLedger {
-        let ledger = TrafficLedger()
+        let ledger = TrafficLedger(fileURL: nil, defaults: .standard)
         let dayKey = dayKey(.now)
         let monthKey = monthKey(.now)
         var bucket = DayBucket()
