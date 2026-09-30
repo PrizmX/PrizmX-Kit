@@ -84,6 +84,20 @@ public final class VPNManager {
     /// Polled alongside tunnel IPC so System Proxy traffic still shows in the UI.
     public var localMetricsProvider: (@Sendable () -> TrafficSnapshot)?
 
+    /// Host sets this while its mixed-port listener is up. The metrics poll
+    /// only runs while the tunnel or local egress is active.
+    @ObservationIgnored
+    public var localEgressActive = false {
+        didSet {
+            guard localEgressActive != oldValue else { return }
+            updateMetricsPolling()
+        }
+    }
+
+    /// True while the 1 Hz metrics poll runs. Consumers (speed history,
+    /// traffic ledger) follow it instead of ticking forever.
+    public private(set) var isPollingMetrics = false
+
     /// User intent: startVPN sets it, stopVPN clears it. A disconnect without
     /// stopVPN means the system killed the plugin (rebuild, update, reclaim)
     /// or the user turned the VPN off from System Settings.
@@ -130,8 +144,6 @@ public final class VPNManager {
             }
         }
         Task { await loadManager() }
-        // Mixed-port counters exist even when the Packet Tunnel is down.
-        startMetricsLoop()
     }
 
     deinit {
@@ -573,7 +585,8 @@ extension VPNManager {
             }
             startMetricsLoop()
         } else if next == .disconnected || next == .invalid || next == .error {
-            // Keep the 1s poller: mixed-port in the app still has live counters.
+            // Keep polling only while mixed-port in the app still has counters.
+            updateMetricsPolling()
             // Only a drop *from* an active session is unexpected. A start
             // while already disconnected must not read a stale user-stop.
             let droppedWhileUp = previous == .connected
@@ -654,8 +667,20 @@ extension VPNManager {
         lastMetrics = .zero
     }
 
+    /// Starts or pauses the poll for the current tunnel / local-egress state.
+    private func updateMetricsPolling() {
+        guard !isMock else { return }
+        if status.isConnectedOrTransitioningOn || localEgressActive {
+            startMetricsLoop()
+        } else if metricsTask != nil {
+            stopMetricsLoop()
+            apply(metrics: .zero)
+        }
+    }
+
     fileprivate func startMetricsLoop() {
         guard metricsTask == nil else { return }
+        isPollingMetrics = true
         metricsTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
@@ -669,6 +694,7 @@ extension VPNManager {
     fileprivate func stopMetricsLoop() {
         metricsTask?.cancel()
         metricsTask = nil
+        isPollingMetrics = false
     }
 
     fileprivate func nextMockMetrics() -> VPNMetrics {

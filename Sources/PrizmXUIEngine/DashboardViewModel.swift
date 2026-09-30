@@ -32,7 +32,7 @@ public final class DashboardViewModel {
         self.profiles = profiles
         self.history = history
         self.speedHistory = history.points
-        startHistorySampling()
+        followMetricsPolling()
     }
 
     deinit {
@@ -111,7 +111,34 @@ public final class DashboardViewModel {
         }
     }
 
+    /// Samples only while `VPNManager` polls; idle (no tunnel, no mixed-port)
+    /// means no 1 Hz wakeups here either.
+    private func followMetricsPolling() {
+        let polling = withObservationTracking {
+            vpn.isPollingMetrics
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.followMetricsPolling() }
+        }
+        if polling {
+            startHistorySampling()
+        } else {
+            stopHistorySampling()
+        }
+    }
+
+    private func stopHistorySampling() {
+        guard let historyTask else { return }
+        historyTask.cancel()
+        self.historyTask = nil
+        // Close the chart on zero instead of freezing at the last rate.
+        history.append(uploadBytesPerSecond: 0, downloadBytesPerSecond: 0)
+        if publishesSpeedHistory {
+            speedHistory = history.points
+        }
+    }
+
     private func startHistorySampling() {
+        guard historyTask == nil else { return }
         historyTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: VPNManager.metricsPollInterval)
