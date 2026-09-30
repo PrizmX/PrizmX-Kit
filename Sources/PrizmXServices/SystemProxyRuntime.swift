@@ -262,7 +262,9 @@ public final class SystemProxyRuntime: @unchecked Sendable {
                     engine: engine,
                     port: socket.port,
                     allowLAN: allowLAN,
-                    accept: socket.accept
+                    accept: socket.accept,
+                    authentication: signature.listen.authentication.map { "\($0.username):\($0.password)" },
+                    skipAuthPrefixes: signature.listen.skipAuthPrefixes
                 )
                 try await server.start()
                 started.append(server)
