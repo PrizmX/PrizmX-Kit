@@ -67,7 +67,12 @@ public final class SystemProxyRuntime: @unchecked Sendable {
     private let proxyGate = NSLock()
     private let systemProxy: SystemProxyControl
     #if canImport(PrizmXAttribution)
-    private let flowAttributor: (any FlowAttributing)? = ProcessFlowAttributor()
+    /// The app is a client of its own listener too (External IP lookup and
+    /// other URLSession requests follow the system proxy). Root / system
+    /// account clients come from the Packet Tunnel's view, while it runs.
+    private let flowAttributor: (any FlowAttributing)? = TunnelAssistedAttributor(
+        local: ProcessFlowAttributor(includesOwnProcess: true)
+    )
     #else
     private let flowAttributor: (any FlowAttributing)? = nil
     #endif
