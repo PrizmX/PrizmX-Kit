@@ -168,36 +168,6 @@ public enum WidgetChrome {
         #endif
     }
 
-    /// Segmented-control track: light gray trough on white, faint lift in dark.
-    public static var chipTrack: Color {
-        #if os(macOS)
-        adaptive(
-            dark: NSColor.white.withAlphaComponent(0.08),
-            light: NSColor.black.withAlphaComponent(0.08)
-        )
-        #else
-        Color.primary.opacity(0.06)
-        #endif
-    }
-
-    /// Selected chip: white pill in light (Settings), faint white lift in dark.
-    public static var chipSelected: Color {
-        #if os(macOS)
-        adaptive(dark: NSColor.white.withAlphaComponent(0.14), light: .white)
-        #else
-        Color.primary.opacity(0.12)
-        #endif
-    }
-
-    /// Light segmented pills sit on a shadow; dark chips are flat.
-    public static var chipShadow: Color {
-        #if os(macOS)
-        adaptive(dark: .clear, light: NSColor.black.withAlphaComponent(0.14))
-        #else
-        Color.black.opacity(0.14)
-        #endif
-    }
-
     public static var shape: RoundedRectangle {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
     }
