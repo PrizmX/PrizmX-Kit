@@ -10,11 +10,13 @@ public final class DashboardViewModel {
     public let vpn: VPNManager
     public let profiles: ProfileStore
 
-    /// Rolling 60s samples bound directly to Swift Charts.
+    /// Rolling 60s samples bound directly to Swift Charts. Zero-padded on the
+    /// left until the window fills, so new samples always enter on the right.
     public private(set) var speedHistory: [SpeedPoint]
 
     @ObservationIgnored
     private var history: SpeedHistoryBuffer
+    private static let sampleInterval = VPNManager.metricsPollInterval / .seconds(1)
     @ObservationIgnored
     nonisolated(unsafe) private var historyTask: Task<Void, Never>?
     /// When false, sampling still fills the ring buffer but the observable
@@ -31,7 +33,7 @@ public final class DashboardViewModel {
         self.vpn = vpn
         self.profiles = profiles
         self.history = history
-        self.speedHistory = history.points
+        self.speedHistory = history.paddedPoints(interval: Self.sampleInterval)
         followMetricsPolling()
     }
 
@@ -107,8 +109,13 @@ public final class DashboardViewModel {
         guard active != publishesSpeedHistory else { return }
         publishesSpeedHistory = active
         if active {
-            speedHistory = history.points
+            speedHistory = paddedHistory
         }
+    }
+
+    /// What `speedHistory` publishes: the buffer padded to a full window.
+    private var paddedHistory: [SpeedPoint] {
+        history.paddedPoints(interval: Self.sampleInterval)
     }
 
     /// Samples only while `VPNManager` polls; idle (no tunnel, no mixed-port)
@@ -133,7 +140,7 @@ public final class DashboardViewModel {
         // Close the chart on zero instead of freezing at the last rate.
         history.append(uploadBytesPerSecond: 0, downloadBytesPerSecond: 0)
         if publishesSpeedHistory {
-            speedHistory = history.points
+            speedHistory = paddedHistory
         }
     }
 
@@ -148,7 +155,7 @@ public final class DashboardViewModel {
                     downloadBytesPerSecond: self.vpn.downloadBytesPerSecond
                 )
                 if self.publishesSpeedHistory {
-                    self.speedHistory = self.history.points
+                    self.speedHistory = self.paddedHistory
                 }
             }
         }

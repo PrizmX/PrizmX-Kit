@@ -26,6 +26,29 @@ func speedHistoryKeepsSixtyPoints() {
 }
 
 @Test
+func speedHistoryPadsWithZerosUntilFull() {
+    let start = Date(timeIntervalSince1970: 1_000)
+    var history = SpeedHistoryBuffer(capacity: 5)
+
+    let empty = history.paddedPoints(interval: 1, now: start)
+    #expect(empty.count == 5)
+    #expect(empty.allSatisfy { $0.uploadBytesPerSecond == 0 && $0.downloadBytesPerSecond == 0 })
+    #expect(empty.last?.timestamp == start.addingTimeInterval(-1))
+
+    history.append(uploadBytesPerSecond: 3, downloadBytesPerSecond: 4, at: start)
+    let padded = history.paddedPoints(interval: 1, now: start)
+    #expect(padded.count == 5)
+    #expect(padded.last?.downloadBytesPerSecond == 4)
+    #expect(padded.map(\.timestamp) == (0..<5).map { start.addingTimeInterval(Double($0 - 4)) })
+    #expect(Set(padded.map(\.id)).count == 5)
+
+    for _ in 0..<4 {
+        history.append(uploadBytesPerSecond: 1, downloadBytesPerSecond: 1)
+    }
+    #expect(history.paddedPoints(interval: 1) == history.points)
+}
+
+@Test
 func byteRateFormatterUsesCompactUnits() {
     #expect(ByteRateFormatter.string(fromBytesPerSecond: 340_000) == "340 KB/s")
     #expect(ByteRateFormatter.string(fromBytesPerSecond: 2_500_000) == "2.5 MB/s")

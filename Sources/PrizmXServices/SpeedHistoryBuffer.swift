@@ -45,6 +45,26 @@ public struct SpeedHistoryBuffer: Sendable {
 
     public var count: Int { buffer.count }
 
+    /// `points` left-padded with zero samples up to `capacity`, so a chart
+    /// starts full and new samples enter from the right edge. Padding steps
+    /// back `interval` from the oldest sample (or `now`), with ids below it.
+    public func paddedPoints(interval: TimeInterval, now: Date = .now) -> [SpeedPoint] {
+        let real = points
+        let missing = capacity - real.count
+        guard missing > 0 else { return real }
+        let anchor = real.first?.timestamp ?? now
+        let firstID = real.first?.id ?? 0
+        let padding = (1...missing).reversed().map { step in
+            SpeedPoint(
+                id: firstID - step,
+                timestamp: anchor.addingTimeInterval(-Double(step) * interval),
+                uploadBytesPerSecond: 0,
+                downloadBytesPerSecond: 0
+            )
+        }
+        return padding + real
+    }
+
     public mutating func append(
         uploadBytesPerSecond: Double,
         downloadBytesPerSecond: Double,
