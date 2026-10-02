@@ -15,7 +15,7 @@ private func flow(
         id: id,
         startedAt: base.addingTimeInterval(seconds),
         endpoint: Endpoint(domain: "example.com", port: 443),
-        via: "Proxies",
+        route: FlowRoute(["Proxies"]),
         uplinkBytes: up,
         milliseconds: milliseconds,
         closed: closed

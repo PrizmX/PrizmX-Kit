@@ -46,7 +46,7 @@ public enum MockTrafficGenerator: Sendable {
             FlowRecord(
                 startedAt: date.addingTimeInterval(-8),
                 endpoint: Endpoint(domain: "github.com", port: 443),
-                via: "Proxies",
+                route: FlowRoute(["🇭🇰 Hong Kong 01", "Proxies"]),
                 uplinkBytes: 4_200,
                 downlinkBytes: 88_000,
                 closed: false,
@@ -56,7 +56,7 @@ public enum MockTrafficGenerator: Sendable {
             FlowRecord(
                 startedAt: date.addingTimeInterval(-3),
                 endpoint: Endpoint(domain: "apple.com", port: 443),
-                via: "Direct",
+                route: FlowRoute([FlowRoute.direct, "🎯Direct"]),
                 uplinkBytes: 1_100,
                 downlinkBytes: 22_000,
                 closed: false,
@@ -70,7 +70,7 @@ public enum MockTrafficGenerator: Sendable {
         FlowRecord(
             startedAt: date.addingTimeInterval(-2),
             endpoint: Endpoint(domain: "github.com", port: 443),
-            via: "Proxies",
+            route: FlowRoute(["🇭🇰 Hong Kong 01", "Proxies"]),
             uplinkBytes: 12_000,
             downlinkBytes: 180_000,
             milliseconds: 1_800,

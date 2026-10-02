@@ -20,6 +20,8 @@ public enum TrafficRankScope: String, CaseIterable, Identifiable, Sendable, Coda
     case app
     case domain
     case policy
+    /// Where traffic left: DIRECT or a node.
+    case exit
 
     public var id: String { rawValue }
 
@@ -28,6 +30,7 @@ public enum TrafficRankScope: String, CaseIterable, Identifiable, Sendable, Coda
         case .app: "App"
         case .domain: "Domain"
         case .policy: "Policy"
+        case .exit: "Outbound"
         }
     }
 
@@ -36,6 +39,7 @@ public enum TrafficRankScope: String, CaseIterable, Identifiable, Sendable, Coda
         case .app: "App totals appear after the packet tunnel attributes flows."
         case .domain: "Domain totals appear when requests are classified."
         case .policy: "Policy totals appear when rules match traffic."
+        case .exit: "Outbound totals appear once traffic leaves through DIRECT or a node."
         }
     }
 }

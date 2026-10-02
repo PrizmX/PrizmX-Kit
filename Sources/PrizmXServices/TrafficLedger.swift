@@ -38,7 +38,7 @@ public final class TrafficLedger {
 
     struct DayBucket: Codable {
         var totals = TrafficTotals()
-        /// up+down per policy label (group name / "proxy").
+        /// up+down per rule policy, proxied traffic only (direct is in totals).
         var policy: [String: UInt64] = [:]
         /// up+down per domain.
         var domain: [String: UInt64] = [:]
@@ -51,6 +51,10 @@ public final class TrafficLedger {
         var domainUDP: [String: UInt64] = [:]
         var policyTCP: [String: UInt64] = [:]
         var policyUDP: [String: UInt64] = [:]
+        /// up+down per exit (`DIRECT` or a node), all traffic.
+        var exit: [String: UInt64] = [:]
+        var exitTCP: [String: UInt64] = [:]
+        var exitUDP: [String: UInt64] = [:]
         /// Hour-of-day (0...23) → proxy / direct / total.
         var hours: [Int: HourBucket] = [:]
 
@@ -79,6 +83,7 @@ public final class TrafficLedger {
         enum CodingKeys: String, CodingKey {
             case totals, policy, domain, app, appNames, hours
             case appTCP, appUDP, domainTCP, domainUDP, policyTCP, policyUDP
+            case exit, exitTCP, exitUDP
         }
 
         init() {}
@@ -96,6 +101,9 @@ public final class TrafficLedger {
             domainUDP = try container.decodeIfPresent([String: UInt64].self, forKey: .domainUDP) ?? [:]
             policyTCP = try container.decodeIfPresent([String: UInt64].self, forKey: .policyTCP) ?? [:]
             policyUDP = try container.decodeIfPresent([String: UInt64].self, forKey: .policyUDP) ?? [:]
+            exit = try container.decodeIfPresent([String: UInt64].self, forKey: .exit) ?? [:]
+            exitTCP = try container.decodeIfPresent([String: UInt64].self, forKey: .exitTCP) ?? [:]
+            exitUDP = try container.decodeIfPresent([String: UInt64].self, forKey: .exitUDP) ?? [:]
             if let typed = try? container.decode([Int: HourBucket].self, forKey: .hours) {
                 hours = typed
             } else if let legacy = try? container.decode([Int: UInt64].self, forKey: .hours) {
@@ -163,7 +171,9 @@ public final class TrafficLedger {
         case .policy:
             source = bucket.policy
             let directTotal = bucket.totals.uploadDirect + bucket.totals.downloadDirect
-            if directTotal > 0 { source["DIRECT"] = directTotal }
+            if directTotal > 0 { source[FlowRoute.direct] = directTotal }
+        case .exit:
+            source = bucket.exit
         }
         let sorted = source.sorted { $0.value > $1.value }.prefix(8)
         let peak = max(sorted.first?.value ?? 1, 1)
@@ -178,8 +188,8 @@ public final class TrafficLedger {
             case .domain:
                 name = entry.key
                 icon = "globe"
-            case .policy:
-                name = entry.key == "proxy" ? "Proxy" : entry.key
+            case .policy, .exit:
+                name = entry.key
                 icon = Self.policyIcon(entry.key)
             }
             let tcp: UInt64
@@ -191,9 +201,16 @@ public final class TrafficLedger {
             case .domain:
                 tcp = bucket.domainTCP[entry.key] ?? 0
                 udp = bucket.domainUDP[entry.key] ?? 0
+            case .policy where entry.key == FlowRoute.direct:
+                // Direct bytes are not in the policy maps; the DIRECT exit holds them.
+                tcp = bucket.exitTCP[entry.key] ?? 0
+                udp = bucket.exitUDP[entry.key] ?? 0
             case .policy:
                 tcp = bucket.policyTCP[entry.key] ?? 0
                 udp = bucket.policyUDP[entry.key] ?? 0
+            case .exit:
+                tcp = bucket.exitTCP[entry.key] ?? 0
+                udp = bucket.exitUDP[entry.key] ?? 0
             }
             return TrafficRankRow(
                 id: "\(scope.rawValue)-\(index)",
@@ -251,6 +268,9 @@ public final class TrafficLedger {
         let domainUDPDeltas = Self.diffCount(metrics.domainUDPBytes, minus: last.domainUDPBytes)
         let policyTCPDeltas = Self.diffCount(metrics.policyTCPBytes, minus: last.policyTCPBytes)
         let policyUDPDeltas = Self.diffCount(metrics.policyUDPBytes, minus: last.policyUDPBytes)
+        let exitDeltas = Self.diff(metrics.exitBytes, minus: last.exitBytes)
+        let exitTCPDeltas = Self.diffCount(metrics.exitTCPBytes, minus: last.exitTCPBytes)
+        let exitUDPDeltas = Self.diffCount(metrics.exitUDPBytes, minus: last.exitUDPBytes)
         last = metrics
         guard uploadDelta > 0 || downloadDelta > 0 else { return }
 
@@ -275,6 +295,9 @@ public final class TrafficLedger {
         for (policy, bytes) in policyDeltas {
             day.policy[policy, default: 0] &+= bytes
         }
+        for (exit, bytes) in exitDeltas {
+            day.exit[exit, default: 0] &+= bytes
+        }
         for (domain, bytes) in domainDeltas {
             day.domain[domain, default: 0] &+= bytes
         }
@@ -290,6 +313,8 @@ public final class TrafficLedger {
         Self.addCounts(&day.domainUDP, domainUDPDeltas)
         Self.addCounts(&day.policyTCP, policyTCPDeltas)
         Self.addCounts(&day.policyUDP, policyUDPDeltas)
+        Self.addCounts(&day.exitTCP, exitTCPDeltas)
+        Self.addCounts(&day.exitUDP, exitUDPDeltas)
         let directDelta = directUpDelta &+ directDownDelta
         let proxyDelta =
             (uploadDelta &- min(uploadDelta, directUpDelta))
@@ -340,7 +365,7 @@ public final class TrafficLedger {
     }
 
     private static func policyIcon(_ label: String) -> String {
-        if label == "DIRECT" { return "arrow.right" }
+        if label == FlowRoute.direct { return "arrow.right" }
         return "arrow.triangle.branch"
     }
 

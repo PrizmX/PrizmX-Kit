@@ -58,3 +58,32 @@ func trafficLedgerMigratesFromUserDefaultsOnce() throws {
     #expect(FileManager.default.fileExists(atPath: file.path))
     #expect(defaults.data(forKey: TrafficLedger.defaultsKey) == nil)
 }
+
+@MainActor
+@Test
+func trafficLedgerRanksExitsAndCountsGroupDirectAsDirect() throws {
+    let ledger = TrafficLedger(fileURL: nil, defaults: .standard)
+    let counter = TrafficCounter()
+    ledger.ingest(counter.snapshot())
+    // A rule on a group that selects DIRECT, and a proxied UDP flow.
+    counter.addBytes(up: 100, down: 900, route: FlowRoute([FlowRoute.direct, "🎯Direct"]), transport: .tcp)
+    counter.addBytes(up: 50, down: 450, route: FlowRoute(["JP 03", "AI"]), transport: .udp)
+    ledger.ingest(counter.snapshot())
+
+    let totals = ledger.totals(for: .day)
+    #expect(totals.uploadDirect == 100)
+    #expect(totals.downloadDirect == 900)
+    #expect(totals.uploadProxy == 50)
+    #expect(totals.downloadProxy == 450)
+
+    let exits = ledger.rows(for: .exit)
+    #expect(exits.map(\.name) == [FlowRoute.direct, "JP 03"])
+    #expect(exits.map(\.tcpBytes) == [1_000, 0])
+    #expect(exits.map(\.udpBytes) == [0, 500])
+
+    let policies = ledger.rows(for: .policy)
+    #expect(policies.map(\.name) == [FlowRoute.direct, "AI"])
+    // DIRECT's protocol split comes from the DIRECT exit.
+    #expect(policies.first?.tcpBytes == 1_000)
+    #expect(policies.last?.udpBytes == 500)
+}
