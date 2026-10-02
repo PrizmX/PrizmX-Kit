@@ -68,7 +68,9 @@ public struct TrafficWaveform: View {
     /// Fraction of card height used by the waveform (1 = full height).
     public var verticalFill: Double
     /// Upload above the origin, download below. Menubar uses this so both
-    /// rates share one plot without overlapping.
+    /// rates share one plot without overlapping. Each half is scaled to its
+    /// own lane's peak, so a quiet upload keeps its shape beside a busy
+    /// download; heights are not comparable across the axis.
     public var splitAxis: Bool
 
     public init(
@@ -127,14 +129,13 @@ public struct TrafficWaveform: View {
                 .foregroundStyle(
                     sample.lane.areaFill(mirroredBelow: sample.lane == .download)
                 )
-                .opacity(sample.isStub ? 0.45 : 1)
                 .interpolationMethod(.linear)
                 LineMark(
                     x: .value("Tick", sample.index),
                     y: .value("Rate", sample.rate),
                     series: .value("Lane", sample.lane.plotKey)
                 )
-                .foregroundStyle(sample.lane.strokeColor.opacity(sample.isStub ? 0.4 : 1))
+                .foregroundStyle(sample.lane.strokeColor)
                 .interpolationMethod(.linear)
                 .lineStyle(StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round))
             }
@@ -175,24 +176,26 @@ public struct TrafficWaveform: View {
         var timestamp: Date
         var rate: Double
         var lane: TrafficWaveformSeries
-        var isStub: Bool
     }
 
+    /// Split samples are fractions of their lane's ceiling (see `plotMax`).
+    /// Below 6 % of it a lane is held at that floor so idle stays visible.
+    /// No per-sample dimming: Charts styles a whole series from its first
+    /// mark, so one idle oldest sample would dim the entire lane.
     private var plotSamples: [PlotSample] {
-        let floor = plotMax * 0.06
-        return series.plottedLanes.flatMap { lane in
-            points.enumerated().map { index, point in
+        series.plottedLanes.flatMap { lane in
+            let ceiling = splitAxis ? splitCeiling(lane) : plotMax
+            let floor = ceiling * 0.06
+            return points.enumerated().map { index, point in
                 let raw = lane.rate(in: point)
-                let stub = splitAxis && raw < floor
-                let magnitude = splitAxis ? max(raw, floor) : raw
+                let magnitude = splitAxis ? max(raw, floor) / ceiling : raw
                 let signed = (splitAxis && lane == .download) ? -magnitude : magnitude
                 return PlotSample(
                     pointID: point.id,
                     index: index,
                     timestamp: point.timestamp,
                     rate: signed,
-                    lane: lane,
-                    isStub: stub
+                    lane: lane
                 )
             }
         }
@@ -203,15 +206,14 @@ public struct TrafficWaveform: View {
         series.peak(in: points) < 1 ? .linear : .catmullRom
     }
 
+    /// Split lanes are normalized to their own ceiling, so the plot spans ±1.
     private var plotMax: Double {
-        if splitAxis {
-            let peak = max(
-                TrafficWaveformSeries.upload.peak(in: points),
-                TrafficWaveformSeries.download.peak(in: points)
-            )
-            return max(yMax ?? RateAxisScale.plotCeiling(peak), 1)
-        }
+        if splitAxis { return 1 }
         return max(yMax ?? RateAxisScale.plotCeiling(series.peak(in: points)), 1)
+    }
+
+    private func splitCeiling(_ lane: TrafficWaveformSeries) -> Double {
+        max(yMax ?? RateAxisScale.plotCeiling(lane.peak(in: points)), 1)
     }
 
     /// Overlay: idle sits near the floor. Split: symmetric around y=0.
