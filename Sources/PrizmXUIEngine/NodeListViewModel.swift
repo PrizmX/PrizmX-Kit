@@ -111,7 +111,7 @@ public final class NodeListViewModel {
             return PolicyMember(
                 id: id,
                 name: node.name,
-                kindLabel: "Node (\(Self.protocolLabel(node.protocolConfig)))",
+                kindLabel: "Node (\(node.protocolConfig.displayName))",
                 node: node
             )
         }
@@ -125,16 +125,6 @@ public final class NodeListViewModel {
             return PolicyMember(id: id, name: id, kindLabel: "REJECT")
         default:
             return PolicyMember(id: id, name: id, kindLabel: "Unsupported", isUnsupported: true)
-        }
-    }
-
-    private static func protocolLabel(_ config: ProtocolConfig) -> String {
-        switch config {
-        case .shadowsocks: "SS"
-        case .vless: "VLESS"
-        case .trojan: "Trojan"
-        case .anytls: "AnyTLS"
-        case .direct: "Direct"
         }
     }
 
