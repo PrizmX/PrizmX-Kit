@@ -94,8 +94,10 @@ public enum SystemProxyConfigurator {
             guard let prefs = preferencesWithAuth() else { return false }
             return commit(prefs, body: body)
         }
+        // Without authorization the commit is expected to fail with
+        // "Permission denied"; only the authorized retry reports errors.
         if let prefs = SCPreferencesCreate(nil, "PrizmX" as CFString, nil),
-           commit(prefs, body: body) {
+           commit(prefs, reportsFailure: false, body: body) {
             return true
         }
         guard let prefs = preferencesWithAuth() else { return false }
@@ -156,6 +158,7 @@ public enum SystemProxyConfigurator {
 
     private static func commit(
         _ prefs: SCPreferences,
+        reportsFailure: Bool = true,
         body: ([String: Any], String) -> [String: Any]
     ) -> Bool {
         guard let set = SCNetworkSetCopyCurrent(prefs) else { return false }
@@ -183,6 +186,10 @@ public enum SystemProxyConfigurator {
             return true
         }
         let err = String(cString: SCErrorString(SCError()))
+        guard reportsFailure else {
+            log.debug("unauthorized commit/apply failed \(err, privacy: .public)")
+            return false
+        }
         log.error("commit/apply failed \(err, privacy: .public)")
         TunnelLog.write(.error, "system proxy commit failed \(err)")
         return false
