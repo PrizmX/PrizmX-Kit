@@ -249,12 +249,16 @@ public final class SystemProxyRuntime: @unchecked Sendable {
         Task {
             _ = await NodeAddressStore.refresh(configText: configText, nameservers: capturedDNS)
         }
+        // Pins refresh in the background, so the file still holds the last
+        // session's answers. Following the profile's DNS, the engine asks the
+        // profile itself instead of dialing those first.
+        let pins = NodeAddressStore.followsProfileDNS(configText: configText) ? [:] : NodeAddressStore.load()
         let engine = try EngineFactory.make(
             configText: configText,
             geoIPURL: GeoAssetStore.resolve(assets.geoIPPath),
             geositeURL: GeoAssetStore.resolve(assets.geositePath),
             systemDNS: capturedDNS,
-            pinnedNodeAddresses: NodeAddressStore.load(),
+            pinnedNodeAddresses: pins,
             overlay: overlay,
             flowAttributor: flowAttributor,
             dnsPersistenceURL: nil
