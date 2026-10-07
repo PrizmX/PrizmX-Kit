@@ -102,3 +102,71 @@ private func snapshot(
     history.ingest(snapshot(active: [longLived], recent: finished))
     #expect(history.flows.map(\.id) == [finished[3].id, finished[2].id, longLived.id])
 }
+
+@Test func flowHistoryMergesLateRowsBetweenKnownOnes() {
+    let first = flow(startedAt: 0, closed: true, milliseconds: 5)
+    let third = flow(startedAt: 2, closed: true, milliseconds: 5)
+    let second = flow(startedAt: 1, closed: true, milliseconds: 5)
+    let fourth = flow(startedAt: 3, closed: false)
+    var history = FlowHistory()
+    history.ingest(snapshot(recent: [first, third]))
+    history.ingest(snapshot(active: [fourth], recent: [second]))
+    #expect(history.flows.map(\.id) == [fourth.id, third.id, second.id, first.id])
+}
+
+@Test func flowHistoryReordersRowWhoseStartMoved() {
+    let id = UUID()
+    let other = flow(startedAt: 1, closed: true, milliseconds: 5)
+    var history = FlowHistory()
+    history.ingest(snapshot(recent: [flow(id, startedAt: 0, closed: true, milliseconds: 5), other]))
+    #expect(history.flows.map(\.id) == [other.id, id])
+
+    history.ingest(snapshot(recent: [flow(id, startedAt: 2, closed: true, milliseconds: 5)]))
+    #expect(history.flows.map(\.id) == [id, other.id])
+}
+
+/// The full rebuild-and-sort `ingest` used before the incremental merge.
+private func referenceIngest(_ flows: [FlowRecord], _ snapshot: TrafficSnapshot, now: Date) -> [FlowRecord] {
+    var byID = Dictionary(uniqueKeysWithValues: flows.map { ($0.id, $0) })
+    for flow in snapshot.activeFlows + snapshot.recentFlows {
+        byID[flow.id] = flow
+    }
+    if snapshot.activeFlows.count >= snapshot.tcpConnections {
+        let open = Set(snapshot.activeFlows.map(\.id))
+        for flow in byID.values where !flow.closed && !open.contains(flow.id) {
+            var closed = flow
+            closed.closed = true
+            closed.milliseconds = max(flow.milliseconds, Int(now.timeIntervalSince(flow.startedAt) * 1_000))
+            byID[flow.id] = closed
+        }
+    }
+    return byID.values.sorted {
+        $0.startedAt != $1.startedAt ? $0.startedAt > $1.startedAt : $0.id.uuidString > $1.id.uuidString
+    }
+}
+
+@Test func flowHistoryMatchesFullSortAcrossPolls() {
+    var seed: UInt64 = 0x5EED
+    func next(_ bound: Int) -> Int {
+        seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+        return Int((seed >> 33) % UInt64(bound))
+    }
+    let ids = (0..<40).map { _ in UUID() }
+    var history = FlowHistory()
+    var reference: [FlowRecord] = []
+    for poll in 0..<200 {
+        // Shared start times exercise the ID tie-break.
+        let picks = (0..<next(8)).map { _ in ids[next(ids.count)] }
+        let flows = picks.map { flow($0, startedAt: Double(next(30)), closed: next(2) == 0) }
+        let active = flows.filter { !$0.closed }
+        let snap = snapshot(
+            active: active,
+            recent: flows.filter(\.closed),
+            tcp: active.count + next(2)
+        )
+        let now = base.addingTimeInterval(Double(poll))
+        history.ingest(snap, now: now)
+        reference = referenceIngest(reference, snap, now: now)
+        #expect(history.flows == reference, "poll \(poll)")
+    }
+}

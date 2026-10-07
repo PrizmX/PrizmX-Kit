@@ -21,29 +21,73 @@ public struct FlowHistory: Sendable {
         self.capacity = capacity
     }
 
+    /// Runs every poll over up to `capacity` rows, so known rows are updated
+    /// in place and only new ones are sorted, then merged into the kept order.
     public mutating func ingest(_ snapshot: TrafficSnapshot, now: Date = .now) {
-        var byID: [UUID: FlowRecord] = [:]
-        byID.reserveCapacity(flows.count + snapshot.activeFlows.count + snapshot.recentFlows.count)
-        for flow in flows {
-            byID[flow.id] = flow
+        var rows = flows
+        var indexByID: [UUID: Int] = [:]
+        indexByID.reserveCapacity(rows.count)
+        for index in rows.indices {
+            indexByID[rows[index].id] = index
+        }
+        var added: [UUID: FlowRecord] = [:]
+        var needsResort = false
+        func upsert(_ flow: FlowRecord) {
+            if let index = indexByID[flow.id] {
+                if rows[index].startedAt != flow.startedAt { needsResort = true }
+                rows[index] = flow
+            } else {
+                added[flow.id] = flow
+            }
         }
         for flow in snapshot.activeFlows {
-            byID[flow.id] = flow
+            upsert(flow)
         }
-        for flow in snapshot.recentFlows where byID[flow.id] != nil || !endedBeforeClear(flow) {
-            byID[flow.id] = flow
+        for flow in snapshot.recentFlows
+        where indexByID[flow.id] != nil || added[flow.id] != nil || !endedBeforeClear(flow) {
+            upsert(flow)
         }
         // A complete open list (nothing cut) is authoritative: a row still open
         // here but missing there closed between polls without its record
         // reaching us (more closes than the window, or the engine stopped).
         if snapshot.activeFlows.count >= snapshot.tcpConnections {
             let open = Set(snapshot.activeFlows.map(\.id))
-            let gone = byID.values.filter { !$0.closed && !open.contains($0.id) }
-            for flow in gone {
-                byID[flow.id] = Self.closing(flow, at: now)
+            for index in rows.indices where !rows[index].closed && !open.contains(rows[index].id) {
+                rows[index] = Self.closing(rows[index], at: now)
+            }
+            for (id, flow) in added where !flow.closed && !open.contains(id) {
+                added[id] = Self.closing(flow, at: now)
             }
         }
-        flows = Self.trimmed(byID.values.sorted(by: Self.newerFirst), to: capacity)
+        let ordered: [FlowRecord]
+        if needsResort {
+            ordered = (rows + added.values).sorted(by: Self.newerFirst)
+        } else {
+            ordered = Self.merged(rows, added.values.sorted(by: Self.newerFirst))
+        }
+        flows = Self.trimmed(ordered, to: capacity)
+    }
+
+    /// Merges two lists already in `newerFirst` order.
+    private static func merged(_ lhs: [FlowRecord], _ rhs: [FlowRecord]) -> [FlowRecord] {
+        guard !rhs.isEmpty else { return lhs }
+        guard !lhs.isEmpty else { return rhs }
+        var result: [FlowRecord] = []
+        result.reserveCapacity(lhs.count + rhs.count)
+        var left = 0
+        var right = 0
+        while left < lhs.count, right < rhs.count {
+            if newerFirst(rhs[right], lhs[left]) {
+                result.append(rhs[right])
+                right += 1
+            } else {
+                result.append(lhs[left])
+                left += 1
+            }
+        }
+        result.append(contentsOf: lhs[left...])
+        result.append(contentsOf: rhs[right...])
+        return result
     }
 
     /// Drops finished rows and keeps open ones (they are still Active).
