@@ -456,18 +456,23 @@ public final class VPNManager {
     /// Live throughput: Packet Tunnel counters plus in-app mixed-port.
     /// Mixed-port is polled even when the tunnel is down (System Proxy only).
     /// Channel is chosen by the host app (`Configuration.metricsChannel`).
+    /// Runs every second, so the file read, JSON decode, mixed-port snapshot
+    /// and merge run off the main actor; each call snapshots local once.
     public func fetchMetrics() async -> VPNMetrics {
         if isMock {
             return status == .connected ? nextMockMetrics() : .zero
         }
-        let local = localMetricsProvider?() ?? .zero
-        guard status == .connected else { return local }
-        if configuration.metricsChannel == .kitFile {
-            if let file = TunnelMetricsStore.load() {
-                return file.merging(local)
-            }
-            return local
+        let provider = localMetricsProvider
+        guard status == .connected else {
+            return await Self.offMain { provider?() ?? .zero }
         }
+        if configuration.metricsChannel == .kitFile {
+            return await Self.offMain {
+                let local = provider?() ?? .zero
+                return TunnelMetricsStore.load()?.merging(local) ?? local
+            }
+        }
+        let local = await Self.offMain { provider?() ?? .zero }
         guard let session = tunnelManager?.connection as? NETunnelProviderSession else {
             return local
         }
@@ -490,11 +495,18 @@ public final class VPNManager {
                     continuation.resume(throwing: error)
                 }
             }
-            return try TunnelIPC.metrics(from: responseData).merging(local)
+            return try await Self.offMain { try TunnelIPC.metrics(from: responseData).merging(local) }
         } catch {
             // Provider may not have registered IPC yet; keep mixed-port alive.
             return local
         }
+    }
+
+    @concurrent
+    nonisolated private static func offMain<T: Sendable>(
+        _ work: @Sendable () throws -> T
+    ) async rethrows -> T {
+        try work()
     }
 
     /// Notifies a running tunnel that the selected outbound changed.
