@@ -369,15 +369,33 @@ public final class TrafficLedger {
         return "arrow.triangle.branch"
     }
 
+    /// Ingest runs on a 1s metrics loop and each write encodes the full
+    /// day/month model, so changes are written at most once a minute;
+    /// `flush()` covers quit and sleep.
+    static let persistInterval: TimeInterval = 60
     private var lastPersist = Date.distantPast
+    /// Ingested changes not yet handed to the writer.
+    private var hasPendingChanges = false
 
-    /// Writes are throttled: ingest runs on a 1s metrics loop and the payload
-    /// is the full day/month model, so an interval cap avoids pointless I/O.
-    /// Encoding and the write run off the main actor.
     private func persist() {
+        hasPendingChanges = true
         let now = Date()
-        guard now.timeIntervalSince(lastPersist) >= 10 else { return }
+        guard now.timeIntervalSince(lastPersist) >= Self.persistInterval else { return }
+        enqueueWrite(now: now)
+    }
+
+    /// Writes pending changes and waits until they are on disk. For quit and
+    /// sleep, where the throttled write may not come.
+    public func flush() {
+        guard hasPendingChanges else { return }
+        enqueueWrite(now: .now)
+        writer.sync {}
+    }
+
+    /// Encoding and the write run off the main actor.
+    private func enqueueWrite(now: Date) {
         lastPersist = now
+        hasPendingChanges = false
         prune(now: now)
         guard let fileURL else { return }
         let file = currentFile()

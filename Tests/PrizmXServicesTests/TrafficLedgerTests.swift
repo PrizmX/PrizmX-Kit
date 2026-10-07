@@ -87,3 +87,30 @@ func trafficLedgerRanksExitsAndCountsGroupDirectAsDirect() throws {
     #expect(policies.first?.tcpBytes == 1_000)
     #expect(policies.last?.udpBytes == 500)
 }
+
+@MainActor
+@Test
+func trafficLedgerFlushWritesThrottledChanges() throws {
+    let suite = "ledger-flush-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let file = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ledger-\(UUID().uuidString)")
+        .appendingPathComponent("TrafficLedger.json")
+    defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+
+    let ledger = TrafficLedger(fileURL: file, defaults: defaults)
+    let counter = TrafficCounter()
+    ledger.ingest(counter.snapshot())
+    counter.addBytes(up: 100, down: 900, route: FlowRoute(["Proxies"]), transport: .tcp)
+    // First change writes at once; the next one falls inside the interval.
+    ledger.ingest(counter.snapshot())
+    counter.addBytes(up: 50, down: 450, route: FlowRoute(["Proxies"]), transport: .tcp)
+    ledger.ingest(counter.snapshot())
+
+    ledger.flush()
+    let reloaded = TrafficLedger(fileURL: file, defaults: defaults)
+    let totals = reloaded.totals(for: .day)
+    #expect(totals.uploadProxy == 150)
+    #expect(totals.downloadProxy == 1_350)
+}
