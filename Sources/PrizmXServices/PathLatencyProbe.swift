@@ -55,6 +55,9 @@ public struct PathLatencyProbe: Sendable {
         let parameters = NWParameters.tcp
         parameters.preferNoProxies = true
         parameters.expiredDNSBehavior = .allow
+        // Direct internet RTT: with "Route All Traffic" the tunnel would
+        // answer the handshake itself.
+        TunnelEgress.prepare(parameters)
         let connection = NWConnection(
             host: NWEndpoint.Host(host),
             port: nwPort,
