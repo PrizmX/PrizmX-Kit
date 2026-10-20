@@ -143,7 +143,9 @@ func concurrentAppliesDoNotLeakListeners() async throws {
     let recorder = ProxyRecorder()
     let runtime = SystemProxyRuntime(systemProxy: recorder.control)
     let first = freePort()
-    let second = first + 1
+    // Its own free port: the one after `first` may already be taken.
+    var second = freePort()
+    while second == first { second = freePort() }
     async let a: Void = runtime.apply(
         configText: config(port: first), overlay: .empty, allowLAN: false, setSystemProxy: true
     )
