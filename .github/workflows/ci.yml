@@ -1,0 +1,54 @@
+# Runs the PrizmX-Kit test suite on pull requests and pushes to main.
+# No secrets.
+#
+# Package.swift depends on ../PrizmX-Foundation, which in turn depends on
+# ../SwiftTCP, so both are checked out as siblings. This is dev CI: it tracks
+# their default branches. App CI and releases pin siblings via
+# PrizmX/dependencies.lock instead.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    # Same image and Xcode pin as the PrizmX release workflow.
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      # Actions are pinned to full commit SHAs; the comment names the tag.
+      - name: Checkout PrizmX-Kit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: PrizmX-Kit
+          persist-credentials: false
+
+      - name: Checkout PrizmX-Foundation (default branch)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: PrizmX/PrizmX-Foundation
+          path: PrizmX-Foundation
+          persist-credentials: false
+
+      - name: Checkout SwiftTCP (default branch)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: PrizmX/SwiftTCP
+          path: SwiftTCP
+          persist-credentials: false
+
+      - name: Test
+        working-directory: PrizmX-Kit
+        run: swift test
