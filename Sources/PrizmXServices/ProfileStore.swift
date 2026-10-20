@@ -62,6 +62,9 @@ public final class ProfileStore {
     /// Persisted group → member choices. Tracked so Policies repaints on change.
     public private(set) var policySelections: [String: String]
     public private(set) var lastError: String?
+    /// Entries of the active profile the importer skipped (unsupported
+    /// rules, proxies, groups). Empty when everything was imported.
+    public private(set) var warnings: [ConfigWarning] = []
     @ObservationIgnored
     private var overlaysByID: [UUID: ProfileOverlay] = [:]
     /// Set when index.json was unreadable and could not be backed up:
@@ -210,19 +213,88 @@ public final class ProfileStore {
     /// Largest subscription body accepted; anything bigger is not a profile.
     nonisolated public static let maxSubscriptionBytes = 10 * 1024 * 1024
 
+    /// Sent with every subscription download. Panels (V2Board, Xboard, …)
+    /// pick the body format from the User-Agent: naming Clash Meta / mihomo
+    /// gets Clash YAML with VLESS / REALITY instead of a share-link list.
+    nonisolated public static var subscriptionUserAgent: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
+        return "clash.meta mihomo/1.19 PrizmX/\(version)"
+    }
+
+    /// Downloads a subscription URL into a new profile. Refuses a body that
+    /// yields nothing usable or whose catch-all rule cannot be routed.
+    /// Returns the entries the importer skipped.
+    @discardableResult
+    public func installSubscription(from url: URL, name: String? = nil) async throws -> [ConfigWarning] {
+        let (data, response) = try await Self.downloadSubscription(from: url)
+        guard let text = Self.decodeSubscriptionBody(data) else {
+            throw ProfileStoreError.unreadableSubscription
+        }
+        // Providers first: a group fed only by them would look empty.
+        await ProviderStore.prepare(configText: text)
+        let parsed = try Self.validatedSubscription(text)
+        let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var profile = ProxyProfile(
+            name: trimmedName.isEmpty ? (url.host ?? "Subscription") : trimmedName,
+            subscriptionURL: url,
+            lastUpdated: Date(),
+            rawConfig: text
+        )
+        profile.applySubscriptionUserInfo(from: response)
+        try upsert(profile)
+        return parsed.warnings
+    }
+
+    /// Adds a profile from local text (a file or a pasted share-link list).
+    /// Unlike a subscription it is kept even when parts do not import, so
+    /// the user can fix the file; the skipped entries are returned.
+    @discardableResult
+    public func importProfile(text: String, name: String) throws -> (id: UUID, warnings: [ConfigWarning]) {
+        let body = Self.decodeSubscriptionBody(Data(text.utf8)) ?? text
+        let warnings = (try? ConfigAdapter.parseWithWarnings(rawString: body).warnings) ?? []
+        let profile = ProxyProfile(name: name, rawConfig: body)
+        try upsert(profile)
+        return (profile.id, warnings)
+    }
+
     /// Downloads a subscription URL and replaces that profile's raw config.
     /// The previous config stays in place unless the download parses.
-    /// Failures are also recorded in `lastError`.
-    public func refreshSubscription(id: UUID) async throws {
+    /// Failures are also recorded in `lastError`. Returns the entries the
+    /// importer skipped.
+    @discardableResult
+    public func refreshSubscription(id: UUID) async throws -> [ConfigWarning] {
         do {
-            try await performSubscriptionRefresh(id: id)
+            return try await performSubscriptionRefresh(id: id)
         } catch {
             lastError = error.localizedDescription
             throw error
         }
     }
 
-    private func performSubscriptionRefresh(id: UUID) async throws {
+    /// The parser skips malformed entries, so refuse a body that yields
+    /// nothing usable, or whose catch-all rule points at a group that was
+    /// dropped (every connection would fail), instead of saving it.
+    nonisolated static func validatedSubscription(_ text: String) throws -> ConfigParseResult {
+        let parsed: ConfigParseResult
+        do {
+            parsed = try ConfigAdapter.parseWithWarnings(rawString: text)
+        } catch {
+            throw ProfileStoreError.invalidSubscription(error.localizedDescription)
+        }
+        if parsed.router.rules.isEmpty, parsed.nodeManager.nodesByID.isEmpty {
+            throw ProfileStoreError.invalidSubscription("no proxies or rules")
+        }
+        if let target = parsed.unroutableCatchAllTarget {
+            let reason = parsed.warnings.first { $0.kind == .group && $0.text == target }?.reason
+            throw ProfileStoreError.invalidSubscription(
+                "the final rule targets \"\(target)\", which could not be imported"
+                    + (reason.map { " (\($0))" } ?? "")
+            )
+        }
+        return parsed
+    }
+
+    private func performSubscriptionRefresh(id: UUID) async throws -> [ConfigWarning] {
         guard let url = profiles.first(where: { $0.id == id })?.subscriptionURL else {
             throw profiles.contains(where: { $0.id == id })
                 ? ProfileStoreError.missingSubscriptionURL
@@ -232,17 +304,8 @@ public final class ProfileStore {
         guard let text = Self.decodeSubscriptionBody(data) else {
             throw ProfileStoreError.unreadableSubscription
         }
-        // The parser skips malformed entries, so also refuse a body that
-        // yields nothing usable instead of wiping a working profile.
-        let parsed: (Router, NodeManager)
-        do {
-            parsed = try ConfigAdapter.parse(rawString: text)
-        } catch {
-            throw ProfileStoreError.invalidSubscription(error.localizedDescription)
-        }
-        if parsed.0.rules.isEmpty, parsed.1.nodesByID.isEmpty {
-            throw ProfileStoreError.invalidSubscription("no proxies or rules")
-        }
+        await ProviderStore.prepare(configText: text)
+        let parsed = try Self.validatedSubscription(text)
 
         // The profile list may have changed while downloading.
         guard let index = profiles.firstIndex(where: { $0.id == id }) else {
@@ -266,6 +329,7 @@ public final class ProfileStore {
         if activeProfileID == id {
             rebuildCatalogIfNeeded()
         }
+        return parsed.warnings
     }
 
     /// Streams the body so an oversized response is cut off early.
@@ -273,7 +337,7 @@ public final class ProfileStore {
         from url: URL
     ) async throws -> (Data, URLResponse) {
         var request = URLRequest(url: url, timeoutInterval: 30)
-        request.setValue("PrizmX/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue(subscriptionUserAgent, forHTTPHeaderField: "User-Agent")
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
             throw ProfileStoreError.subscriptionFailed(http.statusCode)
@@ -294,6 +358,12 @@ public final class ProfileStore {
         return (data, response)
     }
 
+    /// Re-parses the active profile, e.g. after its providers were
+    /// downloaded.
+    public func rebuildCatalog() {
+        rebuildCatalogIfNeeded()
+    }
+
     // MARK: - Disk
 
     public func reload() throws {
@@ -308,21 +378,24 @@ public final class ProfileStore {
             rules = []
             overlay = .empty
             profileGroupNames = []
+            warnings = []
             return
         }
         overlay = loadOverlay(for: active.id)
         do {
-            let body = try ConfigAdapter.parse(rawString: active.rawConfig)
-            profileGroupNames = Set(body.1.groupsByName.keys)
-            let parsed = try overlay.apply(to: body)
+            let body = try ConfigAdapter.parseWithWarnings(rawString: active.rawConfig)
+            profileGroupNames = Set(body.nodeManager.groupsByName.keys)
+            let parsed = try overlay.apply(to: body.tuple)
             rules = parsed.0.rules
             parsed.1.applySelections(PolicySelectionStore.load())
             nodeManager = parsed.1
+            warnings = body.warnings
             lastError = nil
         } catch {
             nodeManager = nil
             rules = []
             profileGroupNames = []
+            warnings = []
             lastError = error.localizedDescription
         }
     }
@@ -462,14 +535,16 @@ public final class ProfileStore {
         guard let text = String(data: data, encoding: .utf8) else { return nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        if looksLikeConfig(trimmed) { return trimmed }
-        let compact = trimmed.replacingOccurrences(of: "\n", with: "")
-        guard let decoded = Data(base64Encoded: compact),
-              let inner = String(data: decoded, encoding: .utf8) else {
-            return nil
-        }
-        let innerTrimmed = inner.trimmingCharacters(in: .whitespacesAndNewlines)
-        return looksLikeConfig(innerTrimmed) ? innerTrimmed : nil
+        if let config = configText(trimmed) { return config }
+        guard let inner = ProxyURIList.decodeBase64(trimmed) else { return nil }
+        return configText(inner.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// A Clash / sing-box body as is, or a share-link list converted to
+    /// Clash YAML.
+    nonisolated private static func configText(_ text: String) -> String? {
+        if looksLikeConfig(text) { return text }
+        return ProxyURIList.clashYAML(from: text)
     }
 
     nonisolated private static func looksLikeConfig(_ text: String) -> Bool {

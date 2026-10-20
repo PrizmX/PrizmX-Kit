@@ -14,11 +14,13 @@ public typealias TrafficByteCount = PrizmXCore.TrafficByteCount
 public enum VPNError: Error, Sendable, Equatable, LocalizedError {
     case notConfigured
     case startFailed(String)
+    case reloadFailed(String)
 
     public var errorDescription: String? {
         switch self {
         case .notConfigured: "VPN is not configured"
         case .startFailed(let message): message
+        case .reloadFailed(let message): message
         }
     }
 }

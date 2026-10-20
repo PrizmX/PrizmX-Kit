@@ -58,6 +58,14 @@ public final class SystemProxyRuntime: @unchecked Sendable {
         /// Bumped by `invalidate` so an in-flight apply does not record a
         /// signature the caller asked to rebuild.
         var invalidation: UInt64 = 0
+        /// Sockets and access the running listeners were opened with. A
+        /// reload that keeps them swaps the engine in place.
+        var listening: ListenKey?
+    }
+
+    private struct ListenKey: Equatable {
+        var allowLAN: Bool
+        var listen: InboundListenConfig
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
@@ -157,9 +165,12 @@ public final class SystemProxyRuntime: @unchecked Sendable {
         } catch {
             // A superseded request's failure is moot; the newer one decides.
             guard isCurrent(generation) else { return }
-            // Fail closed: the old listener is gone, so a system proxy still
-            // pointing at it would take the whole machine offline.
-            restoreSystemProxy(ifCurrent: generation)
+            // Fail closed once the old listener is gone: a system proxy still
+            // pointing at it would take the whole machine offline. A config
+            // that fails to build leaves the running listener serving.
+            if !isRunning {
+                restoreSystemProxy(ifCurrent: generation)
+            }
             throw error
         }
         applySystemProxy(setSystemProxy, listen: signature.listen, generation: generation)
@@ -221,7 +232,12 @@ public final class SystemProxyRuntime: @unchecked Sendable {
     /// Live mixed-port counters. Mutates the engine sample window — call from
     /// the single 1s UI poller only.
     public func metrics() -> TrafficSnapshot {
-        state.withLock { $0.engine?.traffic.snapshot() } ?? .zero
+        state.withLock { current -> TrafficSnapshot in
+            guard let engine = current.engine else { return .zero }
+            var snapshot = engine.traffic.snapshot()
+            snapshot.groupSelections = engine.nodeManager.autoSelections()
+            return snapshot
+        }
     }
 
     public func clearFlows() {
@@ -230,6 +246,11 @@ public final class SystemProxyRuntime: @unchecked Sendable {
 
     /// Returns false when a newer request superseded this one; anything it
     /// started has been torn down again.
+    ///
+    /// The new engine is built while the running listeners keep serving.
+    /// When the sockets and access are unchanged it is swapped into them, so
+    /// a profile or rule change never leaves the system proxy pointing at a
+    /// closed port; otherwise the listeners are reopened.
     private func startServer(
         configText: String,
         overlay: ProfileOverlay,
@@ -238,10 +259,15 @@ public final class SystemProxyRuntime: @unchecked Sendable {
         generation: UInt64
     ) async throws -> Bool {
         let invalidation = state.withLock { $0.invalidation }
-        stopServer()
+        await ProviderStore.prepare(configText: configText)
         let (router, _) = try ConfigAdapter.parse(rawString: configText, overlay: overlay)
-        let needsGeoIP = router.rules.contains { if case .geoIP = $0.matcher { return true }; return false }
-        let needsGeosite = router.rules.contains { if case .geosite = $0.matcher { return true }; return false }
+        let matchers = router.rules.flatMap(\.matcher.flattened)
+        // The DNS section can need them too (fallback-filter, geosite: keys).
+        let dnsSection = ClashDNSSection.parse(from: configText)
+        let needsGeoIP = matchers.contains { if case .geoIP = $0 { return true }; return false }
+            || dnsSection?.usesGeoIP == true
+        let needsGeosite = matchers.contains { if case .geosite = $0 { return true }; return false }
+            || dnsSection?.geositeTags.isEmpty == false
         let assets = await GeoAssetStore.prepare(geoIP: needsGeoIP, geosite: needsGeosite)
         await systemProxy.afterPrepare()
         guard isCurrent(generation) else { return false }
@@ -253,6 +279,11 @@ public final class SystemProxyRuntime: @unchecked Sendable {
         // session's answers. Following the profile's DNS, the engine asks the
         // profile itself instead of dialing those first.
         let pins = NodeAddressStore.followsProfileDNS(configText: configText) ? [:] : NodeAddressStore.load()
+        let key = ListenKey(allowLAN: allowLAN, listen: signature.listen)
+        // Counters carry over when the listeners stay, like a tunnel reload.
+        let keptTraffic = state.withLock { current in
+            current.listening == key && !current.servers.isEmpty ? current.engine?.traffic : nil
+        }
         let engine = try EngineFactory.make(
             configText: configText,
             geoIPURL: GeoAssetStore.resolve(assets.geoIPPath),
@@ -261,8 +292,28 @@ public final class SystemProxyRuntime: @unchecked Sendable {
             pinnedNodeAddresses: pins,
             overlay: overlay,
             flowAttributor: flowAttributor,
-            dnsPersistenceURL: nil
+            dnsPersistenceURL: nil,
+            traffic: keptTraffic
         )
+        let swapped = state.withLock { current -> (done: Bool, previous: Engine?) in
+            guard current.generation == generation,
+                  current.listening == key,
+                  !current.servers.isEmpty
+            else { return (false, nil) }
+            current.servers.forEach { $0.replaceEngine(engine) }
+            let previous = current.engine
+            current.engine = engine
+            current.signature = current.invalidation == invalidation ? signature : nil
+            return (true, previous)
+        }
+        if swapped.done {
+            swapped.previous?.stopURLTest()
+            engine.startURLTest()
+            TunnelLog.write(.info, "inbound engine reloaded lan=\(allowLAN)")
+            return true
+        }
+        guard isCurrent(generation) else { return false }
+        stopServer()
         engine.startURLTest()
         var started: [MixedPortServer] = []
         do {
@@ -290,6 +341,7 @@ public final class SystemProxyRuntime: @unchecked Sendable {
             guard current.generation == generation else { return false }
             current.engine = engine
             current.servers = servers
+            current.listening = key
             current.signature = current.invalidation == invalidation ? signature : nil
             return true
         }
@@ -310,6 +362,7 @@ public final class SystemProxyRuntime: @unchecked Sendable {
             current.servers = []
             current.engine = nil
             current.signature = nil
+            current.listening = nil
             return pair
         }
         snapshot.0.forEach { $0.stop() }

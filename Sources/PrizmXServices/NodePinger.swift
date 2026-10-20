@@ -1,46 +1,57 @@
 import Foundation
-import Network
+import PrizmXConfig
 import PrizmXNodes
 import PrizmXProtocols
 
-/// Concurrent TCP RTT probe against `OutboundNode` servers.
+/// Concurrent delay test (Clash "delay"): an HTTP request to `testURL`
+/// through each node's own protocol, the same probe url-test groups send.
+/// A node that accepts TCP but cannot carry traffic (wrong password, blocked
+/// handshake, dead relay exit) reads as a timeout, not as a low ping.
 ///
-/// Returns milliseconds, or `nil` on timeout / connect failure. Direct nodes
-/// are skipped (`nil`). This does not dial through the proxy handshake — it
-/// measures reachability of the outbound server itself.
-///
-/// Node domains are dialed via their pinned IPv4 (`NodeAddressStore`), never
-/// the system resolver: with TUN on, the system resolver is the tunnel's
-/// FakeDNS and would hand back unreachable fake IPs for proxy-routed names.
+/// Returns milliseconds, or `nil` on timeout / failure. Direct nodes are
+/// skipped (`nil`). Node hostnames resolve through the profile's DNS and the
+/// pinned addresses (`NodeAddressStore`), never the tunnel's FakeDNS.
 public struct NodePinger: Sendable {
     public var timeout: Duration
     public var maxConcurrent: Int
+    public var testURL: URL
 
-    public init(timeout: Duration = .seconds(3), maxConcurrent: Int = 8) {
+    public init(
+        timeout: Duration = .seconds(5),
+        maxConcurrent: Int = 8,
+        testURL: URL = URL(string: PolicyGroup.defaultTestURL)!
+    ) {
         self.timeout = timeout
         self.maxConcurrent = max(1, maxConcurrent)
+        self.testURL = testURL
     }
 
-    /// Probes a single node. `nil` means timeout or unreachable.
-    public func ping(_ node: OutboundNode) async -> Double? {
-        guard let server = node.probeEndpoint else { return nil }
-        return await measure(
-            server: Self.dialTarget(for: server, pins: NodeAddressStore.load()),
-            serverName: server.host.description
+    /// Resolver for a test run against the profile in `configText`.
+    public static func resolver(for configText: String?) -> DNSClient {
+        EngineFactory.makeAppDNS(
+            configText: configText,
+            systemDNS: PhysicalDNSSnapshot.capture(),
+            pinnedNodeAddresses: NodeAddressStore.load()
         )
+    }
+
+    /// Probes a single node. `nil` means timeout or failure.
+    public func ping(_ node: OutboundNode, dns: DNSClient) async -> Double? {
+        guard node.probeEndpoint != nil else { return nil }
+        return await measure(node, dns: dns)
     }
 
     /// Probes every node with a bounded worker pool and streams results live.
     @discardableResult
     public func pingAll(
         _ nodes: [OutboundNode],
+        dns: DNSClient,
         progress: (@MainActor @Sendable (String, Double?) -> Void)? = nil
     ) async -> [String: Double?] {
         guard !nodes.isEmpty else { return [:] }
 
         return await withTaskGroup(of: (String, Double?).self, returning: [String: Double?].self) { group in
             var iterator = nodes.makeIterator()
-            let pins = NodeAddressStore.load()
             var inFlight = 0
             var results: [String: Double?] = [:]
             results.reserveCapacity(nodes.count)
@@ -49,14 +60,8 @@ public struct NodePinger: Sendable {
                 while inFlight < maxConcurrent, !Task.isCancelled, let node = iterator.next() {
                     inFlight += 1
                     group.addTask(priority: .utility) {
-                        var rtt: Double?
-                        if let server = node.probeEndpoint {
-                            rtt = await self.measure(
-                                server: Self.dialTarget(for: server, pins: pins),
-                                serverName: server.host.description
-                            )
-                        }
-                        return (node.id, rtt)
+                        guard node.probeEndpoint != nil else { return (node.id, nil) }
+                        return (node.id, await self.measure(node, dns: dns))
                     }
                 }
             }
@@ -78,105 +83,12 @@ public struct NodePinger: Sendable {
         }
     }
 
-    // MARK: - Pin lookup
-
-    /// Pinned-IP dial target for a domain endpoint; IP literals and unpinned
-    /// domains pass through unchanged.
-    public static func dialTarget(
-        for endpoint: Endpoint,
-        pins: [String: [PrizmXProtocols.IPv4Address]]
-    ) -> Endpoint {
-        guard case .domain(let name) = endpoint.host,
-              let pinned = pins[name.lowercased()]?.first else { return endpoint }
-        return Endpoint(host: .ipv4(pinned), port: endpoint.port)
-    }
-
-    // MARK: - Transport
-
-    private func measure(server: Endpoint, serverName: String) async -> Double? {
-        guard let nwEndpoint = Self.makeNWEndpoint(server) else { return nil }
-
-        let parameters = NWParameters.tcp
-        parameters.expiredDNSBehavior = .allow
-        let connection = NWConnection(to: nwEndpoint, using: parameters)
-        let start = ContinuousClock.now
-
-        let handshake = await connect(connection, timeout: timeout)
-        guard handshake else {
-            connection.cancel()
-            return nil
+    private func measure(_ node: OutboundNode, dns: DNSClient) async -> Double? {
+        let delay = await DNSClient.$current.withValue(dns) {
+            await NodeDelayTest.measure(node, url: testURL, timeout: timeout)
         }
-        if Task.isCancelled {
-            connection.cancel()
-            return nil
-        }
-
-        connection.cancel()
-        return Self.milliseconds(from: start)
-    }
-
-    private func connect(_ connection: NWConnection, timeout: Duration) async -> Bool {
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-                let gate = ResumeGate()
-                connection.stateUpdateHandler = { state in
-                    switch state {
-                    case .ready:
-                        connection.stateUpdateHandler = nil
-                        gate.finish(true, continuation)
-                    case .failed, .cancelled:
-                        connection.stateUpdateHandler = nil
-                        gate.finish(false, continuation)
-                    default:
-                        break
-                    }
-                }
-                connection.start(queue: .global(qos: .utility))
-                Task {
-                    try? await Task.sleep(for: timeout)
-                    if gate.finish(false, continuation) {
-                        connection.cancel()
-                    }
-                }
-            }
-        } onCancel: {
-            connection.cancel()
-        }
-    }
-
-    /// Ensures a `CheckedContinuation` is resumed at most once.
-    private final class ResumeGate: @unchecked Sendable {
-        private let lock = NSLock()
-        private var done = false
-
-        @discardableResult
-        func finish(_ value: Bool, _ continuation: CheckedContinuation<Bool, Never>) -> Bool {
-            lock.lock()
-            defer { lock.unlock() }
-            if done { return false }
-            done = true
-            continuation.resume(returning: value)
-            return true
-        }
-    }
-
-    private static func makeNWEndpoint(_ endpoint: Endpoint) -> NWEndpoint? {
-        guard let port = NWEndpoint.Port(rawValue: endpoint.port) else { return nil }
-        let host: NWEndpoint.Host
-        switch endpoint.host {
-        case .domain(let name):
-            host = NWEndpoint.Host(name)
-        case .ipv4(let address):
-            host = NWEndpoint.Host(address.description)
-        case .ipv6(let address):
-            host = NWEndpoint.Host(address.description)
-        }
-        return .hostPort(host: host, port: port)
-    }
-
-    private static func milliseconds(from start: ContinuousClock.Instant) -> Double {
-        let duration = ContinuousClock.now - start
-        let components = duration.components
+        guard let delay, !Task.isCancelled else { return nil }
+        let components = delay.components
         return Double(components.seconds) * 1_000 + Double(components.attoseconds) / 1e15
     }
 }

@@ -42,8 +42,24 @@ private final class ProxyRecorder: @unchecked Sendable {
     }
 }
 
+/// A port the kernel just handed out and released. A random pick could
+/// land on another test's listener or an ephemeral port in use.
 private func freePort() -> UInt16 {
-    UInt16.random(in: 40_000...59_000)
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { return UInt16.random(in: 40_000...48_000) }
+    defer { close(fd) }
+    var addr = sockaddr_in()
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = 0
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+    let bound = withUnsafeMutablePointer(to: &addr) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            bind(fd, $0, length) == 0 && getsockname(fd, $0, &length) == 0
+        }
+    }
+    guard bound else { return UInt16.random(in: 40_000...48_000) }
+    return UInt16(bigEndian: addr.sin_port)
 }
 
 private func config(port: UInt16) -> String {
@@ -162,6 +178,57 @@ func invalidateKeepsListenerUntilRebuild() async throws {
     #expect(!portIsFree(port))
     try await runtime.apply(configText: config(port: port), overlay: .empty, allowLAN: false, setSystemProxy: false)
     #expect(runtime.isRunning)
+    runtime.shutdown()
+    #expect(await eventuallyFree(port))
+}
+
+/// A rule / profile reload on the same port used to close the listener
+/// before the new engine was ready, leaving the system proxy pointing at a
+/// closed port while geo assets were prepared.
+@Test
+func reloadOnSamePortKeepsListeningWhilePreparing() async throws {
+    let recorder = ProxyRecorder()
+    let runtime = SystemProxyRuntime(systemProxy: recorder.control)
+    let port = freePort()
+    try await runtime.apply(configText: config(port: port), overlay: .empty, allowLAN: false, setSystemProxy: true)
+    runtime.invalidate()
+    recorder.holdStarts()
+    let reload = Task {
+        try await runtime.apply(
+            configText: config(port: port) + "\n# changed",
+            overlay: .empty,
+            allowLAN: false,
+            setSystemProxy: true
+        )
+    }
+    await recorder.waitUntilHeld()
+    #expect(runtime.isRunning)
+    #expect(!portIsFree(port))
+    recorder.release()
+    try await reload.value
+    #expect(runtime.isRunning)
+    #expect(!recorder.recorded.contains(.restore))
+    runtime.shutdown()
+    #expect(await eventuallyFree(port))
+}
+
+@Test
+func brokenReloadKeepsTheRunningListener() async throws {
+    let recorder = ProxyRecorder()
+    let runtime = SystemProxyRuntime(systemProxy: recorder.control)
+    let port = freePort()
+    try await runtime.apply(configText: config(port: port), overlay: .empty, allowLAN: false, setSystemProxy: true)
+    runtime.invalidate()
+    await #expect(throws: (any Error).self) {
+        try await runtime.apply(
+            configText: "{ \"outbounds\": [",
+            overlay: .empty,
+            allowLAN: false,
+            setSystemProxy: true
+        )
+    }
+    #expect(runtime.isRunning)
+    #expect(!recorder.recorded.contains(.restore))
     runtime.shutdown()
     #expect(await eventuallyFree(port))
 }

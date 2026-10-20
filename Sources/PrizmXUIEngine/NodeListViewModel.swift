@@ -81,9 +81,20 @@ public final class NodeListViewModel {
         profiles.activeProfile?.selectedNodeID
     }
 
+    /// Member each url-test / fallback group routes through, as the running
+    /// engine reports it. The app does not probe, so its own catalog would
+    /// only show the first member.
+    public var liveGroupSelections: [String: String] = [:]
+
     /// Currently chosen member (node, nested group, or DIRECT) in `groupName`.
-    /// Reads the persisted Policies selection, then the catalog default.
+    /// url-test / fallback: the live engine's pick. Otherwise the persisted
+    /// Policies selection, then the catalog default.
     public func selectedMemberID(inGroup groupName: String) -> String? {
+        if let mode = profiles.nodeManager?.group(named: groupName)?.mode,
+           mode == .urlTest || mode == .fallback,
+           let live = liveGroupSelections[groupName] {
+            return live
+        }
         if let persisted = profiles.policySelections[groupName] { return persisted }
         return profiles.nodeManager?.selectedMemberID(inGroup: groupName)
     }
@@ -167,8 +178,9 @@ public final class NodeListViewModel {
         return viewModel
     }
 
-    /// Runs a bounded concurrent TCP probe and updates `latencyByNodeID`
-    /// as replies arrive. Cooperative cancellation stops remaining workers.
+    /// Runs a bounded concurrent delay test through each node and updates
+    /// `latencyByNodeID` as replies arrive. Cooperative cancellation stops
+    /// remaining workers.
     public func pingAllNodes() async {
         pingGeneration += 1
         pingTask?.cancel()
@@ -193,7 +205,8 @@ public final class NodeListViewModel {
     }
 
     public func ping(_ node: OutboundNode) async {
-        let rtt = await pinger.ping(node)
+        let dns = NodePinger.resolver(for: profiles.activeProfile?.rawConfig)
+        let rtt = await pinger.ping(node, dns: dns)
         latencyByNodeID[node.id] = rtt
     }
 
@@ -280,7 +293,8 @@ public final class NodeListViewModel {
         // Bounded worker pool lives in NodePinger; results stream back on the
         // main actor as each probe lands. Results from a superseded generation
         // (cancelled but already in flight) are discarded.
-        await pinger.pingAll(nodes) { nodeID, rtt in
+        let dns = NodePinger.resolver(for: profiles.activeProfile?.rawConfig)
+        await pinger.pingAll(nodes, dns: dns) { nodeID, rtt in
             guard self.pingGeneration == generation else { return }
             self.latencyByNodeID[nodeID] = rtt
         }
