@@ -162,20 +162,24 @@ public final class DashboardViewModel {
     }
 
     private func resolvedGroupName(for node: OutboundNode) -> String? {
-        if let stored = profiles.activeProfile?.selectedGroupName,
-           let group = profiles.nodeManager?.group(named: stored),
-           group.nodeIDs.contains(node.id) {
-            return stored
-        }
         guard let manager = profiles.nodeManager else { return node.id }
-        if let named = manager.groupsByName.values.first(where: { group in
-            group.nodeIDs.contains(node.id) && group.name != node.id
-        }) {
-            return named.name
+        return Self.groupName(for: node.id, current: profiles.activeProfile?.selectedGroupName, in: manager)
+    }
+
+    /// The group a picked node goes to: the first select group holding it,
+    /// trying the current group before the others in profile order, so
+    /// every launch picks the same one. A url-test, fallback or
+    /// load-balance group does not keep a manual pick, so it is used only
+    /// when no select group holds the node.
+    static func groupName(for nodeID: String, current: String?, in manager: NodeManager) -> String? {
+        let candidates = [current.flatMap { manager.group(named: $0) }].compactMap { $0 } + manager.groups
+        let holders = candidates.filter { $0.nodeIDs.contains(nodeID) && $0.name != nodeID }
+        if let group = holders.first(where: { $0.mode == .select }) ?? holders.first {
+            return group.name
         }
-        if manager.group(named: node.id) != nil {
-            return node.id
+        if manager.group(named: nodeID) != nil {
+            return nodeID
         }
-        return manager.groupsByName.values.first { $0.nodeIDs.contains(node.id) }?.name
+        return manager.groups.first { $0.nodeIDs.contains(nodeID) }?.name
     }
 }
