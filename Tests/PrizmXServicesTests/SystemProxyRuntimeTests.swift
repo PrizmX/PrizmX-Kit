@@ -43,7 +43,10 @@ private final class ProxyRecorder: @unchecked Sendable {
 }
 
 /// A port the kernel just handed out and released. A random pick could
-/// land on another test's listener or an ephemeral port in use.
+/// land on another test's listener or an ephemeral port in use. Bound on
+/// the wildcard address: NWListener refuses a port that a connection holds
+/// on any local address (a tunnel flow from 198.18.0.1, say), which a probe
+/// on 127.0.0.1 does not see.
 private func freePort() -> UInt16 {
     let fd = socket(AF_INET, SOCK_STREAM, 0)
     guard fd >= 0 else { return UInt16.random(in: 40_000...48_000) }
@@ -51,7 +54,7 @@ private func freePort() -> UInt16 {
     var addr = sockaddr_in()
     addr.sin_family = sa_family_t(AF_INET)
     addr.sin_port = 0
-    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+    addr.sin_addr.s_addr = INADDR_ANY
     var length = socklen_t(MemoryLayout<sockaddr_in>.size)
     let bound = withUnsafeMutablePointer(to: &addr) { pointer in
         pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
