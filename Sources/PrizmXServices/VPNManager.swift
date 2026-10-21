@@ -253,11 +253,12 @@ public final class VPNManager {
         let matchers = router.rules.flatMap(\.matcher.flattened)
         // The DNS section can need them too (fallback-filter, geosite: keys).
         let dnsSection = ClashDNSSection.parse(from: configText)
-        let needsGeoIP = matchers.contains { if case .geoIP = $0 { return true }; return false }
+        let needsGeoIP = matchers.contains { switch $0 { case .geoIP, .srcGeoIP: true; default: false } }
             || dnsSection?.usesGeoIP == true
         let needsGeosite = matchers.contains { if case .geosite = $0 { return true }; return false }
             || dnsSection?.geositeTags.isEmpty == false
-        let assets = await GeoAssetStore.prepare(geoIP: needsGeoIP, geosite: needsGeosite)
+        let needsASN = matchers.contains { switch $0 { case .ipASN, .srcIPASN: true; default: false } }
+        let assets = await GeoAssetStore.prepare(geoIP: needsGeoIP, geosite: needsGeosite, asn: needsASN)
         let configPath = try TunnelConfigStorage.write(configText: configText)
         let overlayPath = overlay.isEmpty
             ? nil
@@ -293,6 +294,9 @@ public final class VPNManager {
         }
         if let path = geositePath ?? assets.geositePath {
             payload[TunnelProviderKeys.geositePath] = path
+        }
+        if let path = assets.asnPath {
+            payload[TunnelProviderKeys.asnPath] = path
         }
         if let overlayPath {
             payload[TunnelProviderKeys.overlayPath] = overlayPath

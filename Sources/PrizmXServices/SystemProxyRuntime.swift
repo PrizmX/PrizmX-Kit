@@ -264,11 +264,12 @@ public final class SystemProxyRuntime: @unchecked Sendable {
         let matchers = router.rules.flatMap(\.matcher.flattened)
         // The DNS section can need them too (fallback-filter, geosite: keys).
         let dnsSection = ClashDNSSection.parse(from: configText)
-        let needsGeoIP = matchers.contains { if case .geoIP = $0 { return true }; return false }
+        let needsGeoIP = matchers.contains { switch $0 { case .geoIP, .srcGeoIP: true; default: false } }
             || dnsSection?.usesGeoIP == true
         let needsGeosite = matchers.contains { if case .geosite = $0 { return true }; return false }
             || dnsSection?.geositeTags.isEmpty == false
-        let assets = await GeoAssetStore.prepare(geoIP: needsGeoIP, geosite: needsGeosite)
+        let needsASN = matchers.contains { switch $0 { case .ipASN, .srcIPASN: true; default: false } }
+        let assets = await GeoAssetStore.prepare(geoIP: needsGeoIP, geosite: needsGeosite, asn: needsASN)
         await systemProxy.afterPrepare()
         guard isCurrent(generation) else { return false }
         let capturedDNS = PhysicalDNSSnapshot.capture()
@@ -288,6 +289,7 @@ public final class SystemProxyRuntime: @unchecked Sendable {
             configText: configText,
             geoIPURL: GeoAssetStore.resolve(assets.geoIPPath),
             geositeURL: GeoAssetStore.resolve(assets.geositePath),
+            asnURL: GeoAssetStore.resolve(assets.asnPath),
             systemDNS: capturedDNS,
             pinnedNodeAddresses: pins,
             overlay: overlay,
