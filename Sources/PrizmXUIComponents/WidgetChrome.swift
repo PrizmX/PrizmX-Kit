@@ -133,7 +133,10 @@ public enum WidgetChrome {
             light: NSColor(srgbRed: light.0, green: light.1, blue: light.2, alpha: 1)
         )
         #else
-        Color(red: light.0, green: light.1, blue: light.2)
+        adaptive(
+            dark: UIColor(red: dark.0, green: dark.1, blue: dark.2, alpha: 1),
+            light: UIColor(red: light.0, green: light.1, blue: light.2, alpha: 1)
+        )
         #endif
     }
 
@@ -142,6 +145,13 @@ public enum WidgetChrome {
     private static func adaptive(dark: NSColor, light: NSColor) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
             appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+        })
+    }
+    #else
+    /// Resolves a dark/light pair against the trait collection.
+    private static func adaptive(dark: UIColor, light: UIColor) -> Color {
+        Color(uiColor: UIColor { traits in
+            traits.userInterfaceStyle == .dark ? dark : light
         })
     }
     #endif
@@ -164,7 +174,7 @@ public enum WidgetChrome {
         #if os(macOS)
         adaptive(dark: .clear, light: NSColor.black.withAlphaComponent(0.08))
         #else
-        Color.black.opacity(0.08)
+        adaptive(dark: .clear, light: UIColor.black.withAlphaComponent(0.08))
         #endif
     }
 
