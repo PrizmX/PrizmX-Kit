@@ -18,39 +18,39 @@ private struct NoLocalAttribution: FlowAttributing {
     }
 }
 
+private func counting(_ clients: [LoopbackClient]?, in count: OSAllocatedUnfairLock<Int>) -> @Sendable () async -> [LoopbackClient]? {
+    {
+        count.withLock { $0 += 1 }
+        return clients
+    }
+}
+
 @Test func tunnelAssistedAttributorGivesUpWithoutTheTunnel() async {
-    let attributor = TunnelAssistedAttributor(local: NoLocalAttribution(), load: { nil })
-    let started = ContinuousClock.now
+    let attributor = TunnelAssistedAttributor(local: NoLocalAttribution(), fetch: { nil })
     let late = await attributor.attributeLate(transport: .tcp, localPort: 52_500, remotePort: 7_890, since: Date())
     #expect(late == nil)
-    #expect(started.duration(to: .now) < TunnelAssistedAttributor.pollInterval)
 }
 
-@Test func tunnelAssistedAttributorWaitsForAWriteAfterTheLookup() async {
-    let since = Date()
+@Test func tunnelAssistedAttributorFindsAClientTheTunnelListsAndTrustsAMiss() async {
     let client = LoopbackClient(clientPort: 52_500, listenPort: 7_890, attribution: apsd)
-    // The first file predates the lookup (it may miss the socket); the next is newer.
-    let reads = OSAllocatedUnfairLock(initialState: 0)
-    let attributor = TunnelAssistedAttributor(local: NoLocalAttribution(), load: {
-        let read = reads.withLock { count -> Int in
-            count += 1
-            return count
-        }
-        return ProxyClientStore.Snapshot(
-            writtenAt: since.timeIntervalSince1970 + (read == 1 ? -0.5 : 0.5),
-            clients: read == 1 ? [] : [client]
-        )
-    })
-    let late = await attributor.attributeLate(transport: .tcp, localPort: 52_500, remotePort: 7_890, since: since)
-    #expect(late == apsd)
-    #expect(reads.withLock { $0 } == 2)
+    let attributor = TunnelAssistedAttributor(local: NoLocalAttribution(), fetch: { [client] })
+    let since = Date()
+    #expect(await attributor.attributeLate(transport: .tcp, localPort: 52_500, remotePort: 7_890, since: since) == apsd)
+    // Another port on the same listener, and the same port on another listener.
+    #expect(await attributor.attributeLate(transport: .tcp, localPort: 52_501, remotePort: 7_890, since: since) == nil)
+    #expect(await attributor.attributeLate(transport: .tcp, localPort: 52_500, remotePort: 7_891, since: since) == nil)
 }
 
-@Test func tunnelAssistedAttributorTrustsAFreshMiss() async {
-    let since = Date()
-    let attributor = TunnelAssistedAttributor(local: NoLocalAttribution(), load: {
-        ProxyClientStore.Snapshot(writtenAt: since.timeIntervalSince1970 + 0.5, clients: [])
-    })
-    let late = await attributor.attributeLate(transport: .tcp, localPort: 52_500, remotePort: 7_890, since: since)
-    #expect(late == nil)
+@Test func tunnelAssistedAttributorSharesAReplyOnlyWithLookupsThatBeganBeforeIt() async {
+    let calls = OSAllocatedUnfairLock(initialState: 0)
+    let attributor = TunnelAssistedAttributor(local: NoLocalAttribution(), fetch: counting([], in: calls))
+    let earlier = Date()
+    _ = await attributor.attributeLate(transport: .tcp, localPort: 52_500, remotePort: 7_890, since: earlier)
+    _ = await attributor.attributeLate(transport: .tcp, localPort: 52_501, remotePort: 7_890, since: earlier)
+    #expect(calls.withLock { $0 } == 1)
+
+    // A socket opened after that request may be missing from its reply.
+    try? await Task.sleep(for: .milliseconds(5))
+    _ = await attributor.attributeLate(transport: .tcp, localPort: 52_502, remotePort: 7_890, since: Date())
+    #expect(calls.withLock { $0 } == 2)
 }

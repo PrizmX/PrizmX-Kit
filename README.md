@@ -22,7 +22,7 @@ SwiftTCP/              required by Foundation
 | `PrizmXUIEngine` | Observation view models |
 | `PrizmXUIComponents` | SwiftUI Home widgets and shared chrome |
 
-`VPNManager.metricsChannel` defaults to `.providerMessage` (Network Extension IPC). Open-core macOS sets `.kitFile` before using `VPNManager.shared`.
+`VPNManager.metricsChannel` defaults to `.providerMessage` (Network Extension IPC). Open-core macOS sets `.xpc` (XPC to its system extension) before using `VPNManager.shared`.
 
 Platforms: macOS 14+, iOS 17+, tvOS 17+. Swift 6.
 

@@ -8,13 +8,31 @@ import PrizmXProtocols
 /// its metrics. Connects on first use and again after the extension restarts;
 /// `nil` means the tunnel is not reachable.
 final class TunnelXPCClient: @unchecked Sendable {
+    static let shared = TunnelXPCClient()
+
     private let lock = NSLock()
     private var connection: NSXPCConnection?
     private var reachable: Bool?
 
     func fetchMetrics() async -> TrafficSnapshot? {
+        let data = await request { $0.fetchMetrics(reply: $1) }
+        let snapshot = data.flatMap { try? JSONDecoder().decode(TrafficSnapshot.self, from: $0) }
+        note(reachable: snapshot != nil)
+        return snapshot
+    }
+
+    /// The local clients of the mixed-port listeners, as the tunnel sees
+    /// them right now.
+    func fetchProxyClients() async -> [LoopbackClient]? {
+        let data = await request { $0.fetchProxyClients(reply: $1) }
+        return data.flatMap { try? JSONDecoder().decode([LoopbackClient].self, from: $0) }
+    }
+
+    private func request(
+        _ call: (any TunnelXPCService, @escaping (Data?) -> Void) -> Void
+    ) async -> Data? {
         let connection = currentConnection()
-        let data: Data? = await withCheckedContinuation { continuation in
+        return await withCheckedContinuation { continuation in
             let once = OnceResume(continuation)
             let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
                 once.resume(nil)
@@ -23,11 +41,8 @@ final class TunnelXPCClient: @unchecked Sendable {
                 once.resume(nil)
                 return
             }
-            proxy.fetchMetrics { once.resume($0) }
+            call(proxy) { once.resume($0) }
         }
-        let snapshot = data.flatMap { try? JSONDecoder().decode(TrafficSnapshot.self, from: $0) }
-        note(reachable: snapshot != nil)
-        return snapshot
     }
 
     private func currentConnection() -> NSXPCConnection {
@@ -62,7 +77,7 @@ final class TunnelXPCClient: @unchecked Sendable {
         guard changed else { return }
         TunnelLog.write(
             now ? .info : .warn,
-            now ? "xpc: metrics reachable" : "xpc: tunnel not reachable, reading the metrics file"
+            now ? "xpc: metrics reachable" : "xpc: tunnel not reachable"
         )
     }
 

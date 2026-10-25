@@ -18,10 +18,8 @@ public final class VPNManager {
     public enum MetricsChannel: Sendable, Equatable {
         /// `NETunnelProviderSession.sendProviderMessage`.
         case providerMessage
-        /// Packet Tunnel writes `tunnel/metrics.json` under the kit root.
-        case kitFile
-        /// XPC to the system extension (`TunnelXPC`), falling back to the
-        /// kit file while the extension cannot be reached. macOS only.
+        /// XPC to the system extension (`TunnelXPC`). macOS only; no
+        /// counters while the extension cannot be reached.
         case xpc
     }
 
@@ -74,10 +72,6 @@ public final class VPNManager {
 
     @ObservationIgnored
     private var tunnelManager: NETunnelProviderManager?
-    #if os(macOS)
-    @ObservationIgnored
-    private let xpcClient = TunnelXPCClient()
-    #endif
     @ObservationIgnored
     nonisolated(unsafe) private var statusObserver: NSObjectProtocol?
     @ObservationIgnored
@@ -597,8 +591,8 @@ public final class VPNManager {
     /// Live throughput: Packet Tunnel counters plus in-app mixed-port.
     /// Mixed-port is polled even when the tunnel is down (System Proxy only).
     /// Channel is chosen by the host app (`Configuration.metricsChannel`).
-    /// Runs every second, so the file read, JSON decode, mixed-port snapshot
-    /// and merge run off the main actor; each call snapshots local once.
+    /// Runs every second, so the JSON decode, mixed-port snapshot and merge
+    /// run off the main actor; each call snapshots local once.
     public func fetchMetrics() async -> VPNMetrics {
         if isMock {
             return status == .connected ? nextMockMetrics() : .zero
@@ -607,14 +601,14 @@ public final class VPNManager {
         guard status == .connected else {
             return await Self.offMain { provider?() ?? .zero }
         }
-        if configuration.metricsChannel != .providerMessage {
+        if configuration.metricsChannel == .xpc {
             let local = await Self.offMain { provider?() ?? .zero }
             #if os(macOS)
-            if configuration.metricsChannel == .xpc, let remote = await xpcClient.fetchMetrics() {
+            if let remote = await TunnelXPCClient.shared.fetchMetrics() {
                 return remote.merging(local)
             }
             #endif
-            return await Self.offMain { TunnelMetricsStore.load()?.merging(local) ?? local }
+            return local
         }
         let local = await Self.offMain { provider?() ?? .zero }
         guard let session = tunnelManager?.connection as? NETunnelProviderSession else {

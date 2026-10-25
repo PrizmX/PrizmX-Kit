@@ -5,28 +5,30 @@ import PrizmXCore
 
 /// Mixed-port attribution for the app. `local` reads the app's own view of
 /// the socket table, which cannot see root / system-account processes
-/// (cloudd, apsd, trustd …). While TUN is on, the root Packet Tunnel
-/// publishes the listeners' clients each second (`ProxyClientStore`), and
-/// `attributeLate` answers those flows from it a moment later.
+/// (cloudd, apsd, trustd …). While TUN is on, the root Packet Tunnel can: the
+/// app asks it over XPC (`TunnelXPCService`) and `attributeLate` answers the
+/// flows `local` missed from its reply.
 public final class TunnelAssistedAttributor: FlowAttributing, @unchecked Sendable {
-    public static let pollInterval: Duration = .milliseconds(250)
-    /// One missed write on top of the 1s cadence.
-    public static let maxWait: Duration = .milliseconds(2_500)
-
     private let local: any FlowAttributing
-    private let load: @Sendable () -> ProxyClientStore.Snapshot?
-    /// Pending lookups share one file read per poll interval.
-    private let cache = OSAllocatedUnfairLock<(at: ContinuousClock.Instant, snapshot: ProxyClientStore.Snapshot?)?>(
+    private let fetch: @Sendable () async -> [LoopbackClient]?
+    /// The latest request and when it began. The tunnel reads its socket
+    /// table after the request arrives, so its reply lists every socket
+    /// opened before that time; a lookup that began earlier can share it.
+    private let latest = OSAllocatedUnfairLock<(began: Date, reply: Task<[LoopbackClient]?, Never>)?>(
         initialState: nil
     )
 
     public convenience init(local: any FlowAttributing) {
-        self.init(local: local, load: { ProxyClientStore.load() })
+        #if os(macOS)
+        self.init(local: local, fetch: { await TunnelXPCClient.shared.fetchProxyClients() })
+        #else
+        self.init(local: local, fetch: { nil })
+        #endif
     }
 
-    init(local: any FlowAttributing, load: @escaping @Sendable () -> ProxyClientStore.Snapshot?) {
+    init(local: any FlowAttributing, fetch: @escaping @Sendable () async -> [LoopbackClient]?) {
         self.local = local
-        self.load = load
+        self.fetch = fetch
     }
 
     public func attribute(
@@ -45,8 +47,9 @@ public final class TunnelAssistedAttributor: FlowAttributing, @unchecked Sendabl
         )
     }
 
-    /// Waits for a snapshot written after `since` (one that surely lists the
-    /// socket if it is still open). No fresh file: the tunnel is not running.
+    /// Asks the tunnel who owns the socket. `since` is when the first lookup
+    /// ran; the reply used began no earlier, so it surely holds the socket if
+    /// it is still open. nil: the tunnel is not running, or has no such client.
     public func attributeLate(
         transport: FlowTransport,
         localPort: UInt16,
@@ -54,24 +57,17 @@ public final class TunnelAssistedAttributor: FlowAttributing, @unchecked Sendabl
         since: Date
     ) async -> FlowAttribution? {
         guard transport == .tcp else { return nil }
-        let deadline = ContinuousClock.now + Self.maxWait
-        while true {
-            guard let snapshot = currentSnapshot() else { return nil }
-            if snapshot.writtenAt >= since.timeIntervalSince1970 {
-                return snapshot.client(port: localPort, listenPort: remotePort)?.attribution
-            }
-            guard ContinuousClock.now < deadline else { return nil }
-            try? await Task.sleep(for: Self.pollInterval)
-        }
+        let clients = await reply(since: since).value
+        return clients?.first { $0.clientPort == localPort && $0.listenPort == remotePort }?.attribution
     }
 
-    private func currentSnapshot() -> ProxyClientStore.Snapshot? {
-        let now = ContinuousClock.now
-        if let hit = cache.withLock({ $0 }), hit.at.duration(to: now) < Self.pollInterval {
-            return hit.snapshot
+    private func reply(since: Date) -> Task<[LoopbackClient]?, Never> {
+        latest.withLock { current in
+            if let current, current.began >= since { return current.reply }
+            let fetch = self.fetch
+            let reply = Task { await fetch() }
+            current = (Date(), reply)
+            return reply
         }
-        let snapshot = load()
-        cache.withLock { $0 = (now, snapshot) }
-        return snapshot
     }
 }
