@@ -275,14 +275,16 @@ public final class VPNManager {
             configText: configText,
             nameservers: capturedDNS
         )
-        let runtimeKit = try TunnelRuntimeStore.stageFromAppGroup()
+        guard let kit = TunnelConfigStorage.containerURL() else {
+            throw TunnelConfigStorageError.appGroupUnavailable
+        }
         TunnelLog.write(
             .info,
-            "configure wrote \(configPath) bytes=\(configText.utf8.count) appDNS=\(capturedDNS) runtime=\(runtimeKit.path)"
+            "configure wrote \(configPath) bytes=\(configText.utf8.count) appDNS=\(capturedDNS) kit=\(kit.path)"
         )
         var payload: [String: Any] = [
             TunnelProviderKeys.configPath: configPath,
-            TunnelProviderKeys.containerPath: runtimeKit.path,
+            TunnelProviderKeys.containerPath: kit.path,
             TunnelProviderKeys.fakeIP: fakeIP,
             TunnelProviderKeys.systemProxy: systemProxy,
             TunnelProviderKeys.allowLAN: allowLAN,

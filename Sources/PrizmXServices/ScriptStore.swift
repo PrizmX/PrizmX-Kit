@@ -108,7 +108,7 @@ public final class ScriptStore {
     }
 
     private var rootURL: URL {
-        configuration.resolvedRoot(fileManager: fileManager)
+        configuration.resolvedRoot()
     }
 
     private var scriptsURL: URL {

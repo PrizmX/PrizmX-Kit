@@ -27,15 +27,17 @@ public final class ProfileStore {
             self.rootDirectory = rootDirectory
         }
 
-        /// Kit folder: `rootDirectory` or `<App Group>/<directoryName>`.
-        func resolvedRoot(fileManager: FileManager) -> URL {
+        /// Kit folder: `rootDirectory`, the kit the process bound (the Mac
+        /// app shares one with its tunnel), or `<App Group>/<directoryName>`.
+        func resolvedRoot() -> URL {
             if let rootDirectory { return rootDirectory }
-            guard let container = fileManager.containerURL(
-                forSecurityApplicationGroupIdentifier: appGroupIdentifier
+            guard let root = TunnelConfigStorage.containerURL(
+                appGroupIdentifier: appGroupIdentifier,
+                directoryName: directoryName
             ) else {
                 preconditionFailure("App Group '\(appGroupIdentifier)' is unavailable")
             }
-            return container.appendingPathComponent(directoryName, isDirectory: true)
+            return root
         }
 
         public static let `default` = Configuration()
@@ -494,7 +496,7 @@ public final class ProfileStore {
     }
 
     private var rootURL: URL {
-        configuration.resolvedRoot(fileManager: fileManager)
+        configuration.resolvedRoot()
     }
 
     private var indexURL: URL {
