@@ -9,8 +9,6 @@ import Observation
 @MainActor
 @Observable
 public final class TrafficLedger {
-    /// Legacy home of the ledger; migrated to `fileURL` once, then removed.
-    static let defaultsKey = "trafficLedger.v2"
     /// Days kept for the day buckets (months keep their own totals).
     static let retainedDays = 35
     static let retainedMonths = 24
@@ -104,13 +102,7 @@ public final class TrafficLedger {
             exit = try container.decodeIfPresent([String: UInt64].self, forKey: .exit) ?? [:]
             exitTCP = try container.decodeIfPresent([String: UInt64].self, forKey: .exitTCP) ?? [:]
             exitUDP = try container.decodeIfPresent([String: UInt64].self, forKey: .exitUDP) ?? [:]
-            if let typed = try? container.decode([Int: HourBucket].self, forKey: .hours) {
-                hours = typed
-            } else if let legacy = try? container.decode([Int: UInt64].self, forKey: .hours) {
-                hours = legacy.mapValues { HourBucket(total: $0) }
-            } else {
-                hours = [:]
-            }
+            hours = (try? container.decode([Int: HourBucket].self, forKey: .hours)) ?? [:]
         }
     }
 
@@ -124,10 +116,10 @@ public final class TrafficLedger {
     private let writer = DispatchQueue(label: "app.prizmx.traffic-ledger", qos: .utility)
 
     public convenience init() {
-        self.init(fileURL: Self.defaultFileURL, defaults: .standard)
+        self.init(fileURL: Self.defaultFileURL)
     }
 
-    init(fileURL: URL?, defaults: UserDefaults) {
+    init(fileURL: URL?) {
         self.fileURL = fileURL
         days = [:]
         months = [:]
@@ -136,13 +128,6 @@ public final class TrafficLedger {
         if let data = try? Data(contentsOf: fileURL),
            let file = try? JSONDecoder().decode(File.self, from: data) {
             load(file)
-        } else if let data = defaults.data(forKey: Self.defaultsKey),
-                  let file = try? JSONDecoder().decode(File.self, from: data) {
-            load(file)
-            prune(now: .now)
-            if Self.write(file: currentFile(), to: fileURL) {
-                defaults.removeObject(forKey: Self.defaultsKey)
-            }
         }
     }
 
@@ -474,7 +459,7 @@ public final class TrafficLedger {
 extension TrafficLedger {
     /// Seeded buckets so Home previews show a populated Ranking card.
     public static var preview: TrafficLedger {
-        let ledger = TrafficLedger(fileURL: nil, defaults: .standard)
+        let ledger = TrafficLedger(fileURL: nil)
         let dayKey = dayKey(.now)
         let monthKey = monthKey(.now)
         var bucket = DayBucket()

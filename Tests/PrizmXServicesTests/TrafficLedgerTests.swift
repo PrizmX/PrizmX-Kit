@@ -12,7 +12,7 @@ private func sample(uplink: UInt64, domains: [String: UInt64]) -> VPNMetrics {
 @MainActor
 @Test
 func trafficLedgerPrunesOldDaysAndCapsDomains() {
-    let ledger = TrafficLedger(fileURL: nil, defaults: .standard)
+    let ledger = TrafficLedger(fileURL: nil)
     ledger.ingest(.zero)
     var domains: [String: UInt64] = [:]
     for index in 0..<(TrafficLedger.maxRankedKeys * 2) {
@@ -34,35 +34,8 @@ func trafficLedgerPrunesOldDaysAndCapsDomains() {
 
 @MainActor
 @Test
-func trafficLedgerMigratesFromUserDefaultsOnce() throws {
-    let suite = "prizmx.tests.ledger.\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
-    defer { defaults.removePersistentDomain(forName: suite) }
-    let file = FileManager.default.temporaryDirectory
-        .appendingPathComponent("ledger-\(UUID().uuidString)")
-        .appendingPathComponent("TrafficLedger.json")
-    defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
-
-    var bucket = TrafficLedger.DayBucket()
-    bucket.totals.uploadProxy = 4_096
-    bucket.domain = ["a.example": 4_096]
-    let legacy = TrafficLedger.File(
-        days: [TrafficLedger.dayKey(.now): bucket],
-        months: [:],
-        last: .zero
-    )
-    defaults.set(try JSONEncoder().encode(legacy), forKey: TrafficLedger.defaultsKey)
-
-    let migrated = TrafficLedger(fileURL: file, defaults: defaults)
-    #expect(migrated.totals(for: .day).uploadProxy == 4_096)
-    #expect(FileManager.default.fileExists(atPath: file.path))
-    #expect(defaults.data(forKey: TrafficLedger.defaultsKey) == nil)
-}
-
-@MainActor
-@Test
 func trafficLedgerRanksExitsAndCountsGroupDirectAsDirect() throws {
-    let ledger = TrafficLedger(fileURL: nil, defaults: .standard)
+    let ledger = TrafficLedger(fileURL: nil)
     let counter = TrafficCounter()
     ledger.ingest(counter.snapshot())
     // A rule on a group that selects DIRECT, and a proxied UDP flow.
@@ -91,15 +64,12 @@ func trafficLedgerRanksExitsAndCountsGroupDirectAsDirect() throws {
 @MainActor
 @Test
 func trafficLedgerFlushWritesThrottledChanges() throws {
-    let suite = "ledger-flush-\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
-    defer { defaults.removePersistentDomain(forName: suite) }
     let file = FileManager.default.temporaryDirectory
         .appendingPathComponent("ledger-\(UUID().uuidString)")
         .appendingPathComponent("TrafficLedger.json")
     defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
 
-    let ledger = TrafficLedger(fileURL: file, defaults: defaults)
+    let ledger = TrafficLedger(fileURL: file)
     let counter = TrafficCounter()
     ledger.ingest(counter.snapshot())
     counter.addBytes(up: 100, down: 900, route: FlowRoute(["Proxies"]), transport: .tcp)
@@ -109,7 +79,7 @@ func trafficLedgerFlushWritesThrottledChanges() throws {
     ledger.ingest(counter.snapshot())
 
     ledger.flush()
-    let reloaded = TrafficLedger(fileURL: file, defaults: defaults)
+    let reloaded = TrafficLedger(fileURL: file)
     let totals = reloaded.totals(for: .day)
     #expect(totals.uploadProxy == 150)
     #expect(totals.downloadProxy == 1_350)
