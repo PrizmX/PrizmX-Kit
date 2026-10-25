@@ -3,11 +3,11 @@ import os
 import PrizmXConfig
 import PrizmXCore
 
-/// Mixed-port attribution for the sandboxed app. `local` reads the app's own
-/// view of the socket table, which cannot see root / system-account
-/// processes (cloudd, apsd, trustd …). While TUN is on, the root Packet
-/// Tunnel publishes the listeners' clients each second (`ProxyClientStore`),
-/// and `attributeLate` answers those flows from it a moment later.
+/// Mixed-port attribution for the app. `local` reads the app's own view of
+/// the socket table, which cannot see root / system-account processes
+/// (cloudd, apsd, trustd …). While TUN is on, the root Packet Tunnel
+/// publishes the listeners' clients each second (`ProxyClientStore`), and
+/// `attributeLate` answers those flows from it a moment later.
 public final class TunnelAssistedAttributor: FlowAttributing, @unchecked Sendable {
     public static let pollInterval: Duration = .milliseconds(250)
     /// One missed write on top of the 1s cadence.

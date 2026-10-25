@@ -5,7 +5,7 @@ import Testing
 
 private let apsd = FlowAttribution(pid: 617, processName: "apsd")
 
-/// The sandboxed app's own table: root clients are invisible.
+/// The app's own table: root clients are invisible.
 private struct NoLocalAttribution: FlowAttributing {
     func attribute(
         transport: FlowTransport,
