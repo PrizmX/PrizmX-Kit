@@ -107,6 +107,7 @@ public final class TrafficLedger {
     }
 
     private var days: [String: DayBucket]
+    private var session = TrafficTotals()
     private var months: [String: TrafficTotals]
     /// Last cumulative snapshot used as the diff baseline.
     private var last: VPNMetrics
@@ -119,7 +120,9 @@ public final class TrafficLedger {
         self.init(fileURL: Self.defaultFileURL)
     }
 
-    init(fileURL: URL?) {
+    /// `fileURL` nil keeps the ledger in memory only, gone when the process
+    /// ends (the community Mac app, previews, tests).
+    public init(fileURL: URL?) {
         self.fileURL = fileURL
         days = [:]
         months = [:]
@@ -135,6 +138,11 @@ public final class TrafficLedger {
         days = file.days
         months = file.months
         last = file.last
+    }
+
+    /// Everything ingested since this ledger was created.
+    public func sessionTotals() -> TrafficTotals {
+        session
     }
 
     public func totals(for period: TrafficPeriod, now: Date = .now) -> TrafficTotals {
@@ -276,6 +284,10 @@ public final class TrafficLedger {
         month.downloadDirect &+= directDownDelta
         month.uploadProxy &+= uploadDelta &- min(uploadDelta, directUpDelta)
         month.downloadProxy &+= downloadDelta &- min(downloadDelta, directDownDelta)
+        session.uploadDirect &+= directUpDelta
+        session.downloadDirect &+= directDownDelta
+        session.uploadProxy &+= uploadDelta &- min(uploadDelta, directUpDelta)
+        session.downloadProxy &+= downloadDelta &- min(downloadDelta, directDownDelta)
 
         for (policy, bytes) in policyDeltas {
             day.policy[policy, default: 0] &+= bytes

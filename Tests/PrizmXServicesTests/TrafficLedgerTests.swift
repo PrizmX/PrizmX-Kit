@@ -84,3 +84,23 @@ func trafficLedgerFlushWritesThrottledChanges() throws {
     #expect(totals.uploadProxy == 150)
     #expect(totals.downloadProxy == 1_350)
 }
+
+@MainActor
+@Test
+func trafficLedgerSessionTotalsCountEverythingSinceItWasCreated() {
+    let ledger = TrafficLedger(fileURL: nil)
+    let counter = TrafficCounter()
+    ledger.ingest(counter.snapshot())
+    counter.addBytes(up: 100, down: 900, route: FlowRoute([FlowRoute.direct]), transport: .tcp)
+    counter.addBytes(up: 50, down: 450, route: FlowRoute(["Proxies"]), transport: .tcp)
+    ledger.ingest(counter.snapshot())
+    // A tunnel restart resets the counters; the session keeps what it had.
+    ledger.ingest(TrafficCounter().snapshot())
+
+    let session = ledger.sessionTotals()
+    #expect(session.uploadDirect == 100)
+    #expect(session.downloadDirect == 900)
+    #expect(session.uploadProxy == 50)
+    #expect(session.downloadProxy == 450)
+    #expect(session == ledger.totals(for: .day))
+}
