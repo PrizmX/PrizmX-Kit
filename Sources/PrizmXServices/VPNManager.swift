@@ -20,6 +20,9 @@ public final class VPNManager {
         case providerMessage
         /// Packet Tunnel writes `tunnel/metrics.json` under the kit root.
         case kitFile
+        /// XPC to the system extension (`TunnelXPC`), falling back to the
+        /// kit file while the extension cannot be reached. macOS only.
+        case xpc
     }
 
     public struct Configuration: Sendable, Equatable {
@@ -71,6 +74,10 @@ public final class VPNManager {
 
     @ObservationIgnored
     private var tunnelManager: NETunnelProviderManager?
+    #if os(macOS)
+    @ObservationIgnored
+    private let xpcClient = TunnelXPCClient()
+    #endif
     @ObservationIgnored
     nonisolated(unsafe) private var statusObserver: NSObjectProtocol?
     @ObservationIgnored
@@ -600,11 +607,14 @@ public final class VPNManager {
         guard status == .connected else {
             return await Self.offMain { provider?() ?? .zero }
         }
-        if configuration.metricsChannel == .kitFile {
-            return await Self.offMain {
-                let local = provider?() ?? .zero
-                return TunnelMetricsStore.load()?.merging(local) ?? local
+        if configuration.metricsChannel != .providerMessage {
+            let local = await Self.offMain { provider?() ?? .zero }
+            #if os(macOS)
+            if configuration.metricsChannel == .xpc, let remote = await xpcClient.fetchMetrics() {
+                return remote.merging(local)
             }
+            #endif
+            return await Self.offMain { TunnelMetricsStore.load()?.merging(local) ?? local }
         }
         let local = await Self.offMain { provider?() ?? .zero }
         guard let session = tunnelManager?.connection as? NETunnelProviderSession else {
