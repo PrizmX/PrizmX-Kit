@@ -182,12 +182,29 @@ public final class NodeListViewModel {
     /// `latencyByNodeID` as replies arrive. Cooperative cancellation stops
     /// remaining workers.
     public func pingAllNodes() async {
+        await ping(nodes: uniqueNodes)
+    }
+
+    /// Delay test of `groupName`'s own nodes; nested groups and
+    /// DIRECT / REJECT are skipped.
+    public func pingGroup(_ groupName: String) async {
+        guard let manager = profiles.nodeManager,
+              let group = manager.group(named: groupName)
+        else { return }
+        var seen: Set<String> = []
+        let nodes = group.nodeIDs.compactMap { id in
+            seen.insert(id).inserted ? manager.nodesByID[id] : nil
+        }
+        await ping(nodes: nodes)
+    }
+
+    private func ping(nodes: [OutboundNode]) async {
         pingGeneration += 1
         pingTask?.cancel()
         let generation = pingGeneration
         let task = Task<Void, Never>(priority: .utility) { [weak self] in
             guard let self else { return }
-            await self.runPingAll(generation: generation)
+            await self.runPing(nodes, generation: generation)
         }
         pingTask = task
         await withTaskCancellationHandler {
@@ -275,8 +292,7 @@ public final class NodeListViewModel {
         return sections
     }
 
-    private func runPingAll(generation: Int) async {
-        let nodes = uniqueNodes
+    private func runPing(_ nodes: [OutboundNode], generation: Int) async {
         guard !nodes.isEmpty else { return }
 
         isPinging = true
