@@ -3,6 +3,7 @@ import os
 import PrizmXProtocols
 
 #if os(macOS)
+import PrizmXProxyHelper
 import Security
 import SystemConfiguration
 
@@ -10,7 +11,8 @@ import SystemConfiguration
 /// System Settings → Network → Proxies shows).
 ///
 /// `apply` / `restore` are no-ops when the desired state is already in
-/// effect (our applied flag). Authorization is copied once per process.
+/// effect (our applied flag). Writes go through `ProxyHelper` once the user
+/// allowed it; otherwise authorization is copied once per process.
 public enum SystemProxyConfigurator {
     private static let backupKey = "prizmx.systemProxy.backup"
     private static let appliedKey = "prizmx.systemProxy.applied"
@@ -88,20 +90,46 @@ public enum SystemProxyConfigurator {
         log.info("restored previous proxy settings")
     }
 
-    @discardableResult
+    /// Reads every proxied service, backs it up on first use, and writes what
+    /// `body` returns: through the privileged helper when the user allowed
+    /// it, otherwise in-process with authorization.
     private static func mutateServices(_ body: ([String: Any], String) -> [String: Any]) -> Bool {
+        guard let reader = SCPreferencesCreate(nil, "PrizmX" as CFString, nil) else {
+            log.error("SCPreferencesCreate failed")
+            TunnelLog.write(.error, "system proxy preferences create failed")
+            return false
+        }
+        let current = readServices(reader)
+        snapshotIfNeeded(current)
+        var next: [String: [String: Any]] = [:]
+        for (serviceID, config) in current {
+            next[serviceID] = body(config, serviceID)
+        }
+        switch ProxyHelper.write(next) {
+        case .written:
+            return true
+        case .failed(let err):
+            log.error("helper write failed \(err, privacy: .public)")
+            TunnelLog.write(.error, "system proxy helper failed \(err)")
+            return false
+        case .unavailable:
+            return writeInProcess(next)
+        }
+    }
+
+    private static func writeInProcess(_ configs: [String: [String: Any]]) -> Bool {
         if box.copiedRights {
             guard let prefs = preferencesWithAuth() else { return false }
-            return commit(prefs, body: body)
+            return commit(configs, to: prefs)
         }
         // Without authorization the commit is expected to fail with
         // "Permission denied"; only the authorized retry reports errors.
         if let prefs = SCPreferencesCreate(nil, "PrizmX" as CFString, nil),
-           commit(prefs, reportsFailure: false, body: body) {
+           commit(configs, to: prefs, reportsFailure: false) {
             return true
         }
         guard let prefs = preferencesWithAuth() else { return false }
-        return commit(prefs, body: body)
+        return commit(configs, to: prefs)
     }
 
     private static func preferencesWithAuth() -> SCPreferences? {
@@ -157,35 +185,11 @@ public enum SystemProxyConfigurator {
     }
 
     private static func commit(
-        _ prefs: SCPreferences,
-        reportsFailure: Bool = true,
-        body: ([String: Any], String) -> [String: Any]
+        _ configs: [String: [String: Any]],
+        to prefs: SCPreferences,
+        reportsFailure: Bool = true
     ) -> Bool {
-        guard let set = SCNetworkSetCopyCurrent(prefs) else { return false }
-        guard let cfServices = SCNetworkSetCopyServices(set) else { return false }
-
-        var snapshots: [String: [String: Any]] = [:]
-        for case let service as SCNetworkService in cfServices as NSArray {
-            guard SCNetworkServiceGetEnabled(service) else { continue }
-            guard let serviceID = SCNetworkServiceGetServiceID(service) as String? else { continue }
-            if shouldSkip(service) { continue }
-            guard let proto = SCNetworkServiceCopyProtocol(service, kSCNetworkProtocolTypeProxies) else {
-                continue
-            }
-            let current = (SCNetworkProtocolGetConfiguration(proto) as? [String: Any]) ?? [:]
-            snapshots[serviceID] = current
-            let next = body(current, serviceID)
-            if !SCNetworkProtocolSetConfiguration(proto, next as CFDictionary) {
-                log.error("SetConfiguration failed for \(serviceID, privacy: .public)")
-            }
-        }
-
-        snapshotIfNeeded(snapshots)
-
-        if SCPreferencesCommitChanges(prefs), SCPreferencesApplyChanges(prefs) {
-            return true
-        }
-        let err = String(cString: SCErrorString(SCError()))
+        guard let err = ProxyServiceWriter.write(configs, to: prefs) else { return true }
         guard reportsFailure else {
             log.debug("unauthorized commit/apply failed \(err, privacy: .public)")
             return false
@@ -193,6 +197,23 @@ public enum SystemProxyConfigurator {
         log.error("commit/apply failed \(err, privacy: .public)")
         TunnelLog.write(.error, "system proxy commit failed \(err)")
         return false
+    }
+
+    /// Proxies dictionaries of the enabled services we manage, by service ID.
+    private static func readServices(_ prefs: SCPreferences) -> [String: [String: Any]] {
+        guard let set = SCNetworkSetCopyCurrent(prefs),
+              let cfServices = SCNetworkSetCopyServices(set) else { return [:] }
+        var configs: [String: [String: Any]] = [:]
+        for case let service as SCNetworkService in cfServices as NSArray {
+            guard SCNetworkServiceGetEnabled(service) else { continue }
+            guard let serviceID = SCNetworkServiceGetServiceID(service) as String? else { continue }
+            if shouldSkip(service) { continue }
+            guard let proto = SCNetworkServiceCopyProtocol(service, kSCNetworkProtocolTypeProxies) else {
+                continue
+            }
+            configs[serviceID] = (SCNetworkProtocolGetConfiguration(proto) as? [String: Any]) ?? [:]
+        }
+        return configs
     }
 
     private static func snapshotIfNeeded(_ current: [String: [String: Any]]) {

@@ -9,6 +9,7 @@
 //   * PrizmXServices     — VPN IPC, profile persistence, node probing
 //   * PrizmXUIEngine     — Observation ViewModels
 //   * PrizmXUIComponents — reusable SwiftUI controls
+//   * PrizmXProxyHelper  — macOS privileged helper XPC contract and writer
 
 import PackageDescription
 
@@ -23,6 +24,8 @@ let package = Package(
         .library(name: "PrizmXServices", targets: ["PrizmXServices"]),
         .library(name: "PrizmXUIEngine", targets: ["PrizmXUIEngine"]),
         .library(name: "PrizmXUIComponents", targets: ["PrizmXUIComponents"]),
+        // Linked by the app's privileged helper tool; no other dependencies.
+        .library(name: "PrizmXProxyHelper", targets: ["PrizmXProxyHelper"]),
     ],
     dependencies: [
         // Sibling checkout: PrizmX/PrizmX-Foundation
@@ -43,8 +46,10 @@ let package = Package(
                     package: "PrizmX-Foundation",
                     condition: .when(platforms: [.macOS])
                 ),
+                .target(name: "PrizmXProxyHelper", condition: .when(platforms: [.macOS])),
             ]
         ),
+        .target(name: "PrizmXProxyHelper"),
         .target(
             name: "PrizmXUIEngine",
             dependencies: ["PrizmXServices"]
@@ -55,7 +60,7 @@ let package = Package(
         ),
         .testTarget(
             name: "PrizmXServicesTests",
-            dependencies: ["PrizmXServices"]
+            dependencies: ["PrizmXServices", "PrizmXProxyHelper"]
         ),
         .testTarget(
             name: "PrizmXUIEngineTests",
