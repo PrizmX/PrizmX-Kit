@@ -21,7 +21,7 @@ public enum ProxyHelper {
     }
 
     private static let log = Logger(subsystem: "app.prizmx", category: "ProxyHelper")
-    private static let timeout: DispatchTimeInterval = .seconds(10)
+    private static let timeout: DispatchTimeInterval = .seconds(2)
 
     private static var service: SMAppService {
         SMAppService.daemon(plistName: ProxyHelperXPC.plistName)
@@ -69,7 +69,11 @@ public enum ProxyHelper {
         proxy.writeProxies(encoded) { error in
             outcome.finish(error.map(WriteResult.failed) ?? .written)
         }
-        return outcome.wait(timeout: timeout) ?? .failed("helper timed out")
+        if let result = outcome.wait(timeout: timeout) {
+            return result
+        }
+        log.error("helper timed out")
+        return .unavailable
     }
 
     /// First reply wins; XPC may call both the reply and the error handler.
