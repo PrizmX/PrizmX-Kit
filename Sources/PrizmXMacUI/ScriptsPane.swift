@@ -473,7 +473,7 @@ private struct ScriptURLImportSheet: View {
                     .padding(.horizontal, 20)
                     .padding(.top, 20)
                 Form {
-                    TextField("Script URL", text: $urlString, prompt: Text("https://example.com/script.js"))
+                    TextField("Script URL", text: $urlString, prompt: Text(verbatim: "https://example.com/script.js"))
                         .textContentType(.URL)
                     TextField("Name", text: $name, prompt: Text("Optional"))
                     Picker("Type", selection: $kind) {

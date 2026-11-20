@@ -370,7 +370,7 @@ private struct ModuleURLImportSheet: View {
                     .padding(.horizontal, 20)
                     .padding(.top, 20)
                 Form {
-                    TextField("Module URL", text: $urlString, prompt: Text("https://example.com/module.sgmodule"))
+                    TextField("Module URL", text: $urlString, prompt: Text(verbatim: "https://example.com/module.sgmodule"))
                         .textContentType(.URL)
                 }
                 .formStyle(.grouped)

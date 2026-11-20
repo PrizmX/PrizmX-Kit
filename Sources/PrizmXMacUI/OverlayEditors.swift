@@ -44,7 +44,7 @@ struct OverlayRuleEditor: View {
                         }
                     }
                     if type != .matchAll {
-                        TextField("Payload", text: $payload, prompt: Text("e.g. example.com or 192.168.0.0/16"))
+                        TextField("Payload", text: $payload, prompt: Text(verbatim: "e.g. example.com or 192.168.0.0/16"))
                     }
                     Picker("Policy", selection: $policy) {
                         ForEach(policyOptions, id: \.self) { name in
@@ -139,7 +139,7 @@ struct OverlayGroupEditor: View {
                         Text("load-balance").tag("load-balance")
                     }
                     if mode != "select" {
-                        TextField("Test URL", text: $testURL, prompt: Text("https://www.gstatic.com/generate_204"))
+                        TextField("Test URL", text: $testURL, prompt: Text(verbatim: "https://www.gstatic.com/generate_204"))
                     }
                     Section("Members") {
                         ForEach(memberChoices, id: \.self) { item in
