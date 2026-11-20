@@ -225,13 +225,22 @@ extension TrafficCard where Accessory == EmptyView {
 
 // MARK: - Ranking
 
+/// Hover payload for a Ranking row's TCP / UDP tooltip (card coordinate space).
+struct RankingRowHover: Equatable {
+    var row: TrafficRankRow
+    var point: CGPoint
+}
+
 /// Hourly chart + ranked list by App / Domain / Policy.
 public struct RankingCard<Accessory: View>: View {
+
     public var rows: [TrafficRankRow]
     public var hourly: [RankingHourSample]
     public var emptyText: String
     public var iconImage: @Sendable (TrafficRankRow) -> Image?
     @ViewBuilder public var accessory: () -> Accessory
+    @State private var rowHover: RankingRowHover?
+    @State private var tooltipSize: CGSize = .zero
 
     public init(
         rows: [TrafficRankRow],
@@ -267,7 +276,8 @@ public struct RankingCard<Accessory: View>: View {
                         } else {
                             RankingList(
                                 rows: Array(rows.prefix(rowCount)),
-                                iconImage: iconImage
+                                iconImage: iconImage,
+                                hover: $rowHover
                             )
                         }
                     }
@@ -277,8 +287,38 @@ public struct RankingCard<Accessory: View>: View {
                     )
                 }
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+                .coordinateSpace(name: RankingLayout.coordinateSpaceName)
+                .overlay(alignment: .topLeading) {
+                    if let rowHover {
+                        let origin = tooltipOrigin(
+                            cursor: rowHover.point,
+                            tooltip: tooltipSize,
+                            bounds: geo.size
+                        )
+                        RankingRowTooltip(row: rowHover.row)
+                            .onGeometryChange(for: CGSize.self) { $0.size } action: { tooltipSize = $0 }
+                            .offset(x: origin.x, y: origin.y)
+                            .allowsHitTesting(false)
+                    }
+                }
             }
         }
+    }
+
+    /// Prefer above-right of the cursor; flip and clamp so the tooltip stays in-card.
+    private func tooltipOrigin(cursor: CGPoint, tooltip: CGSize, bounds: CGSize) -> CGPoint {
+        let gap: CGFloat = 12
+        var originX = cursor.x + gap
+        var originY = cursor.y - gap - tooltip.height
+        if originX + tooltip.width > bounds.width {
+            originX = cursor.x - gap - tooltip.width
+        }
+        if originY < 0 {
+            originY = cursor.y + gap
+        }
+        originX = min(max(0, originX), max(0, bounds.width - tooltip.width))
+        originY = min(max(0, originY), max(0, bounds.height - tooltip.height))
+        return CGPoint(x: originX, y: originY)
     }
 }
 
@@ -300,6 +340,7 @@ extension RankingCard where Accessory == EmptyView {
 }
 
 enum RankingLayout {
+    static let coordinateSpaceName = "prizmx.rankingCard"
     static let maxRows = 5
     static let minRows = 3
     static let rowHeight: CGFloat = 28
@@ -324,6 +365,7 @@ enum RankingLayout {
 public struct RankingList: View {
     public var rows: [TrafficRankRow]
     public var iconImage: @Sendable (TrafficRankRow) -> Image?
+    @Binding var hover: RankingRowHover?
 
     public init(
         rows: [TrafficRankRow],
@@ -331,11 +373,23 @@ public struct RankingList: View {
     ) {
         self.rows = rows
         self.iconImage = iconImage
+        self._hover = .constant(nil)
+    }
+
+    init(
+        rows: [TrafficRankRow],
+        iconImage: @escaping @Sendable (TrafficRankRow) -> Image? = { _ in nil },
+        hover: Binding<RankingRowHover?>
+    ) {
+        self.rows = rows
+        self.iconImage = iconImage
+        self._hover = hover
     }
 
     public var body: some View {
         VStack(spacing: RankingLayout.rowSpacing) {
             ForEach(rows) { row in
+                let isHovered = hover?.row.id == row.id
                 HStack(alignment: .center, spacing: 8) {
                     RankingRowIcon(row: row, image: iconImage(row))
                     VStack(alignment: .leading, spacing: 4) {
@@ -346,11 +400,60 @@ public struct RankingList: View {
                             Text(ByteRateFormatter.byteCount(row.bytes))
                                 .font(.subheadline.monospacedDigit().weight(.semibold))
                         }
-                        RankingProtocolBar(row: row)
+                        RankingProtocolBar(row: row, isHovered: isHovered)
                     }
                 }
                 .frame(height: RankingLayout.rowHeight)
+                .contentShape(Rectangle())
+                #if os(macOS)
+                .onContinuousHover(coordinateSpace: .named(RankingLayout.coordinateSpaceName)) { phase in
+                    switch phase {
+                    case .active(let location):
+                        hover = RankingRowHover(row: row, point: location)
+                    case .ended:
+                        if hover?.row.id == row.id {
+                            hover = nil
+                        }
+                    }
+                }
+                #endif
             }
+        }
+    }
+}
+
+private struct RankingRowTooltip: View {
+    var row: TrafficRankRow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(row.name)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            metric("TCP", row.tcpBytes, tint: WidgetChrome.transportTCP)
+            metric("UDP", row.udpBytes, tint: WidgetChrome.transportUDP)
+        }
+        .font(.caption.monospacedDigit())
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(minWidth: 156, maxWidth: 210, alignment: .leading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func metric(_ title: String, _ bytes: UInt64, tint: Color? = nil) -> some View {
+        HStack(spacing: 6) {
+            if let tint {
+                Circle()
+                    .fill(tint)
+                    .frame(width: 6, height: 6)
+            }
+            Text(title)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 12)
+            Text(ByteRateFormatter.byteCount(bytes))
+                .fontWeight(.semibold)
         }
     }
 }
@@ -358,6 +461,7 @@ public struct RankingList: View {
 /// Split TCP / UDP bar. Falls back to theme ink when protocol totals are missing.
 private struct RankingProtocolBar: View {
     var row: TrafficRankRow
+    var isHovered: Bool = false
 
     var body: some View {
         GeometryReader { geo in
@@ -383,13 +487,10 @@ private struct RankingProtocolBar: View {
                 }
                 Spacer(minLength: 0)
             }
+            .scaleEffect(y: isHovered ? 1.5 : 1, anchor: .center)
+            .animation(.easeOut(duration: 0.12), value: isHovered)
         }
         .frame(height: 3)
-        .help(protocolHelp)
-    }
-
-    private var protocolHelp: String {
-        "TCP \(ByteRateFormatter.byteCount(row.tcpBytes))  UDP \(ByteRateFormatter.byteCount(row.udpBytes))"
     }
 }
 
