@@ -18,6 +18,7 @@ struct RulesPane: View {
         let rows = rowBuilder.rows(
             rules: appModel.dashboard.profiles.rules,
             localIDs: overlay.rules.map(\.id),
+            moduleSources: appModel.modules.moduleRuleSources(),
             search: search
         )
         Group {
@@ -77,8 +78,8 @@ struct RulesPane: View {
         .init("type", "Type", width: 140) { $0.type },
         .init("payload", "Payload", width: 320, minWidth: 120, flexible: true, font: NativeTableFont.mono) { $0.payload },
         .init("policy", "Policy", width: 120) { $0.policy },
-        .init("source", "Source", width: 80, color: { $0.isLocal ? .labelColor : .secondaryLabelColor }) {
-            $0.isLocal ? "Local" : "Profile"
+        .init("source", "Source", width: 120, color: { $0.isLocal ? .labelColor : .secondaryLabelColor }) {
+            $0.sourceLabel
         },
     ]
 

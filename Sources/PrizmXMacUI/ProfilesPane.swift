@@ -549,8 +549,8 @@ private struct InstallFromURLSheet: View {
                     .padding(.horizontal, 20)
                     .padding(.top, 20)
                 Form {
-                    TextField("Name", text: $name)
-                    TextField("Subscription URL", text: $urlString)
+                    TextField("Name", text: $name, prompt: Text("Optional"))
+                    TextField("Subscription URL", text: $urlString, prompt: Text("https://example.com/subscribe"))
                         .textContentType(.URL)
                 }
                 .formStyle(.grouped)

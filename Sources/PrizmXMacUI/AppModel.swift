@@ -4,6 +4,7 @@ import Observation
 import SwiftUI
 import PrizmXConfig
 import PrizmXProtocols
+import PrizmXScripts
 import PrizmXServices
 import PrizmXUIEngine
 
@@ -167,20 +168,9 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
         }
     }
 
-    var isEnabled: Bool {
-        switch self {
-        case .module, .scripts: false
-        default: true
-        }
-    }
+    var isEnabled: Bool { true }
 
-    var placeholderSummary: String? {
-        switch self {
-        case .module: "Overlay snippets on the active profile."
-        case .scripts: "Extend routing with JavaScript."
-        default: nil
-        }
-    }
+    var placeholderSummary: String? { nil }
 }
 
 /// Shared session for the menu-bar panel and the main console window.
@@ -204,6 +194,8 @@ public final class AppModel {
     public let nodeList: NodeListViewModel
     let trafficLedger: TrafficLedger
     let scripts: ScriptStore
+    let scriptScheduler: ScriptScheduler
+    let modules: ModuleStore
     let networkLink: NetworkLinkMonitor
     var geoStatus: GeoAssetStore.Status = GeoAssetStore.inspectStatus()
     var isRefreshingGeo = false
@@ -478,7 +470,10 @@ public final class AppModel {
             eventsLogLevel = .info
             sessionStartedAt = Date().addingTimeInterval(-3_723)
             trafficLedger = .preview
-            scripts = .preview
+            let previewScripts = ScriptStore.preview
+            scripts = previewScripts
+            scriptScheduler = ScriptScheduler(store: previewScripts)
+            modules = ModuleStore(storage: .memory)
             internetLatency = 9
             dnsLatency = 6
             var history = FlowHistory()
@@ -533,7 +528,28 @@ public final class AppModel {
             // Like Clash: traffic stats live in memory and reset when the app
             // quits, so nothing is rewritten on disk while traffic flows.
             trafficLedger = TrafficLedger(fileURL: nil)
-            scripts = ScriptStore()
+            let moduleStore = ModuleStore()
+            modules = moduleStore
+            profiles.applyModuleOverlay(moduleStore.combinedOverlay)
+            let scriptStore = ScriptStore()
+            scripts = scriptStore
+            let kvURL = scriptStore.fileURL.deletingLastPathComponent().appendingPathComponent("script-kv.json")
+            let link = self.networkLink
+            scriptScheduler = ScriptScheduler(
+                store: scriptStore,
+                persistentStore: FileScriptPersistentStore(fileURL: kvURL),
+                networkProvider: {
+                    ScriptNetworkInfo(
+                        v4PrimaryAddress: link.lanIPv4 == "—" ? nil : link.lanIPv4,
+                        v4PrimaryInterface: nil,
+                        wifiSSID: link.kind == .wifi ? link.title : nil
+                    )
+                },
+                notificationHandler: { title, subtitle, body in
+                    let parts = [title, subtitle, body].filter { !$0.isEmpty }.joined(separator: " — ")
+                    TunnelLog.write(.info, "script notification: \(parts)")
+                }
+            )
         }
         // Assignments in init skip didSet.
         refreshInspectorRows()
@@ -545,8 +561,10 @@ public final class AppModel {
             trackSessionClock()
             trackTunnelEgress()
             trackAnalyticsProxyState()
+            scriptScheduler.start()
             networkLink.onChange = { [weak self] in
                 self?.scheduleEgressRefresh()
+                self?.scriptScheduler.handleNetworkChanged()
             }
         }
         terminateObserver = NotificationCenter.default.addObserver(
@@ -916,7 +934,7 @@ public final class AppModel {
         // to a restart.
         if tunModeEnabled, dashboard.status == .connected {
             let config = dashboard.profiles.activeProfile?.rawConfig ?? VPNManager.defaultDirectConfig
-            let overlay = dashboard.profiles.overlay
+            let overlay = dashboard.profiles.effectiveOverlay
             // Forget node addresses before the reload re-resolves them for
             // the new engine. The old engine may still write some back; a
             // stale pin is healed by re-resolution at dial time.
@@ -999,7 +1017,7 @@ public final class AppModel {
             clearPendingDNSCache()
         }
         let config = dashboard.profiles.activeProfile?.rawConfig ?? VPNManager.defaultDirectConfig
-        let overlay = dashboard.profiles.overlay
+        let overlay = dashboard.profiles.effectiveOverlay
         if !tunModeEnabled {
             dashboard.vpn.stopVPN()
             await applyMixedPort(config: config, overlay: overlay)
@@ -1151,6 +1169,14 @@ public final class AppModel {
         geoRefreshSummary = result.updatedCount > 0
             ? "Updated \(result.updatedCount) database(s). Reconnect to apply."
             : "Could not download databases. Check network connectivity."
+    }
+
+    func didChangeModules() {
+        modules.reloadFromDiskFiles()
+        dashboard.profiles.applyModuleOverlay(modules.combinedOverlay)
+        if tunModeEnabled || systemProxyEnabled || allowLANEnabled {
+            scheduleReload(reason: "modules updated")
+        }
     }
 
     public func reloadActiveProfileIfNeeded() {

@@ -120,8 +120,10 @@ public struct SurgeStyleMainWindow: View {
             EventsPane()
         case .settings:
             SettingsPane()
-        case .module, .scripts:
-            ComingSoonPane(item: appModel.selectedSidebarItem)
+        case .scripts:
+            ScriptsPane()
+        case .module:
+            ModulesPane()
         }
     }
 }

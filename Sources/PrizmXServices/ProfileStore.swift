@@ -59,6 +59,20 @@ public final class ProfileStore {
     public private(set) var rules: [RouteRule] = []
     /// Overlay owned by the active profile (empty when none).
     public private(set) var overlay: ProfileOverlay = .empty
+    /// Combined overlay from enabled Modules (applied behind local overlay, in front of profile body).
+    public private(set) var moduleOverlay: ProfileOverlay = .empty
+
+    /// Effective overlay sent to Packet Tunnel / mixed-port (local overrides modules).
+    public var effectiveOverlay: ProfileOverlay {
+        overlay.merging(moduleOverlay)
+    }
+
+    /// Updates the enabled-modules overlay and rebuilds the active catalog.
+    public func applyModuleOverlay(_ next: ProfileOverlay) {
+        guard next != moduleOverlay else { return }
+        moduleOverlay = next
+        rebuildCatalog()
+    }
     /// Group names from the profile body, before overlay overrides.
     public private(set) var profileGroupNames: Set<String> = []
     /// Persisted group → member choices. Tracked so Policies repaints on change.
@@ -414,7 +428,7 @@ public final class ProfileStore {
         do {
             let body = try ConfigAdapter.parseWithWarnings(rawString: active.rawConfig)
             profileGroupNames = Set(body.nodeManager.groupsByName.keys)
-            let parsed = try overlay.apply(to: body.tuple)
+            let parsed = try effectiveOverlay.apply(to: body.tuple)
             rules = parsed.0.rules
             parsed.1.applySelections(PolicySelectionStore.load())
             nodeManager = parsed.1

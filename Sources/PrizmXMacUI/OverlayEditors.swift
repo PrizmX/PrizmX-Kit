@@ -44,8 +44,7 @@ struct OverlayRuleEditor: View {
                         }
                     }
                     if type != .matchAll {
-                        TextField("Payload", text: $payload)
-                            .textFieldStyle(.roundedBorder)
+                        TextField("Payload", text: $payload, prompt: Text("e.g. example.com or 192.168.0.0/16"))
                     }
                     Picker("Policy", selection: $policy) {
                         ForEach(policyOptions, id: \.self) { name in
@@ -131,8 +130,7 @@ struct OverlayGroupEditor: View {
                     .padding(.horizontal, 20)
                     .padding(.top, 20)
                 Form {
-                    TextField("Name", text: $name)
-                        .textFieldStyle(.roundedBorder)
+                    TextField("Name", text: $name, prompt: Text("Group name"))
                         .disabled(nameLocked)
                     Picker("Mode", selection: $mode) {
                         Text("select").tag("select")
@@ -141,8 +139,7 @@ struct OverlayGroupEditor: View {
                         Text("load-balance").tag("load-balance")
                     }
                     if mode != "select" {
-                        TextField("Test URL", text: $testURL)
-                            .textFieldStyle(.roundedBorder)
+                        TextField("Test URL", text: $testURL, prompt: Text("https://www.gstatic.com/generate_204"))
                     }
                     Section("Members") {
                         ForEach(memberChoices, id: \.self) { item in

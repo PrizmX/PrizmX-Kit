@@ -68,6 +68,7 @@ let package = Package(
                 .product(name: "PrizmXConfig", package: "PrizmX-Foundation"),
                 .product(name: "PrizmXNodes", package: "PrizmX-Foundation"),
                 .product(name: "PrizmXProtocols", package: "PrizmX-Foundation"),
+                .product(name: "PrizmXScripts", package: "PrizmX-Foundation"),
             ],
             swiftSettings: [
                 .defaultIsolation(MainActor.self),
