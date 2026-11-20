@@ -49,8 +49,9 @@ struct NativeTable<Row: Identifiable & Equatable>: View {
     private struct Representable: NSViewRepresentable {
         var table: NativeTable
 
-        func makeCoordinator() -> Coordinator {
-            Coordinator(table)
+        func makeCoordinator() -> NativeTableCoordinator {
+            let model = NativeTableModel(table)
+            return NativeTableCoordinator(model: model)
         }
 
         func makeNSView(context: Context) -> NSScrollView {
@@ -58,19 +59,15 @@ struct NativeTable<Row: Identifiable & Equatable>: View {
         }
 
         func updateNSView(_ scroll: NSScrollView, context: Context) {
-            context.coordinator.apply(table)
+            (context.coordinator.model as? NativeTableModel<Row>)?.apply(table)
         }
 
-        static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
-            coordinator.table?.menu?.delegate = nil
-            coordinator.table?.target = nil
-            coordinator.table?.delegate = nil
-            coordinator.table?.dataSource = nil
-            coordinator.table = nil
+        static func dismantleNSView(_ scroll: NSScrollView, coordinator: NativeTableCoordinator) {
+            coordinator.detach()
         }
     }
 
-    private func makeScrollView(coordinator: Coordinator) -> NSScrollView {
+    private func makeScrollView(coordinator: NativeTableCoordinator) -> NSScrollView {
         let table = NSTableView()
         table.style = .inset
         table.usesAlternatingRowBackgroundColors = true
@@ -94,7 +91,7 @@ struct NativeTable<Row: Identifiable & Equatable>: View {
         table.delegate = coordinator
         table.dataSource = coordinator
         table.target = coordinator
-        table.doubleAction = #selector(Coordinator.performPrimaryAction(_:))
+        table.doubleAction = #selector(NativeTableCoordinator.performPrimaryAction(_:))
         let menu = NSMenu()
         menu.delegate = coordinator
         table.menu = menu
@@ -106,30 +103,110 @@ struct NativeTable<Row: Identifiable & Equatable>: View {
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
 
-        coordinator.table = table
-        coordinator.apply(self)
+        coordinator.attach(table: table)
+        (coordinator.model as? NativeTableModel<Row>)?.apply(self)
         return scroll
     }
+}
 
-    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
-        /// More inserted + removed rows than this reload instead.
-        private static var maxIncrementalChanges: Int { 200 }
+/// Non-generic AppKit delegate/data-source wrapper. Keeping the `NSObject`
+/// subclass non-generic avoids a Swift 6.3.3 CMO EarlyPerfInliner crash on
+/// generic `Coordinator.deinit` in Release archives.
+private protocol NativeTableControlling: AnyObject {
+    var table: NSTableView? { get set }
+    var rowCount: Int { get }
+    func view(in tableView: NSTableView, for tableColumn: NSTableColumn?, row: Int) -> NSView?
+    func selectionDidChange()
+    func sortDescriptorsDidChange(in tableView: NSTableView)
+    func performPrimaryAction(row: Int)
+    func menuItems(for row: Int) -> [NativeTableMenuItem]
+}
 
-        weak var table: NSTableView?
-        private var parent: NativeTable
-        private var columnsByID: [String: NativeTableColumn<Row>]
-        private var rows: [Row] = []
-        private var menuActions: [() -> Void] = []
-        /// Set while rows, sort or selection are applied in code: AppKit
-        /// reports those changes too, and only user actions may write back.
-        private var isApplying = false
+private final class NativeTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
+    var model: (any NativeTableControlling)?
+    private var menuActions: [() -> Void] = []
 
-        init(_ parent: NativeTable) {
-            self.parent = parent
-            columnsByID = Dictionary(parent.columns.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    init(model: any NativeTableControlling) {
+        self.model = model
+    }
+
+    func attach(table: NSTableView) {
+        model?.table = table
+    }
+
+    func detach() {
+        model?.table?.menu?.delegate = nil
+        model?.table?.target = nil
+        model?.table?.delegate = nil
+        model?.table?.dataSource = nil
+        model?.table = nil
+        menuActions = []
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        model?.rowCount ?? 0
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        model?.view(in: tableView, for: tableColumn, row: row)
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        model?.selectionDidChange()
+    }
+
+    func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+        model?.sortDescriptorsDidChange(in: tableView)
+    }
+
+    @objc func performPrimaryAction(_ sender: NSTableView) {
+        model?.performPrimaryAction(row: sender.clickedRow)
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        menuActions = []
+        guard let table = model?.table,
+              let items = model?.menuItems(for: table.clickedRow)
+        else { return }
+        for item in items {
+            let menuItem = NSMenuItem(title: item.title, action: #selector(performMenuItem(_:)), keyEquivalent: "")
+            menuItem.target = self
+            menuItem.tag = menuActions.count
+            menuActions.append(item.action)
+            menu.addItem(menuItem)
         }
+    }
 
-        func apply(_ next: NativeTable) {
+    @objc private func performMenuItem(_ sender: NSMenuItem) {
+        guard menuActions.indices.contains(sender.tag) else { return }
+        menuActions[sender.tag]()
+    }
+}
+
+private final class NativeTableModel<Row: Identifiable & Equatable>: NativeTableControlling {
+    /// More inserted + removed rows than this reload instead.
+    private static var maxIncrementalChanges: Int { 200 }
+
+    weak var table: NSTableView?
+    private var parent: NativeTable<Row>
+    private var columnsByID: [String: NativeTableColumn<Row>]
+    private var rows: [Row] = []
+    /// Set while rows, sort or selection are applied in code: AppKit
+    /// reports those changes too, and only user actions may write back.
+    private var isApplying = false
+
+    init(_ parent: NativeTable<Row>) {
+        self.parent = parent
+        columnsByID = Dictionary(parent.columns.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    @inline(never)
+    deinit {}
+
+    var rowCount: Int { rows.count }
+
+    func apply(_ next: NativeTable<Row>) {
             parent = next
             columnsByID = Dictionary(next.columns.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             guard let table else { return }
@@ -238,68 +315,43 @@ struct NativeTable<Row: Identifiable & Equatable>: View {
             }
         }
 
-        // MARK: NSTableViewDataSource / NSTableViewDelegate
+    func view(in tableView: NSTableView, for tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard let tableColumn, row < rows.count,
+              let column = columnsByID[tableColumn.identifier.rawValue]
+        else { return nil }
+        let cell = tableView.makeView(withIdentifier: column.identifier, owner: nil) as? NativeTableCellView
+            ?? NativeTableCellView(identifier: column.identifier, showsIcon: column.icon != nil)
+        cell.configure(column, rows[row])
+        return cell
+    }
 
-        func numberOfRows(in tableView: NSTableView) -> Int {
-            rows.count
+    func selectionDidChange() {
+        guard !isApplying, let table else { return }
+        let row = table.selectedRow
+        let id = row >= 0 && row < rows.count ? rows[row].id : nil
+        if parent.selection != id {
+            parent.selection = id
         }
+    }
 
-        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-            guard let tableColumn, row < rows.count,
-                  let column = columnsByID[tableColumn.identifier.rawValue]
-            else { return nil }
-            let cell = tableView.makeView(withIdentifier: column.identifier, owner: nil) as? NativeTableCellView
-                ?? NativeTableCellView(identifier: column.identifier, showsIcon: column.icon != nil)
-            cell.configure(column, rows[row])
-            return cell
-        }
+    func sortDescriptorsDidChange(in tableView: NSTableView) {
+        guard !isApplying,
+              let sortOrder = parent.sortOrder,
+              let descriptor = tableView.sortDescriptors.first,
+              let key = descriptor.key,
+              let sort = columnsByID[key]?.sort
+        else { return }
+        sortOrder.wrappedValue = [sort.comparator(descriptor.ascending ? .forward : .reverse)]
+    }
 
-        func tableViewSelectionDidChange(_ notification: Notification) {
-            guard !isApplying, let table else { return }
-            let row = table.selectedRow
-            let id = row >= 0 && row < rows.count ? rows[row].id : nil
-            if parent.selection != id {
-                parent.selection = id
-            }
-        }
+    func performPrimaryAction(row: Int) {
+        guard let primaryAction = parent.primaryAction, row >= 0, row < rows.count else { return }
+        primaryAction(rows[row])
+    }
 
-        func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
-            guard !isApplying,
-                  let sortOrder = parent.sortOrder,
-                  let descriptor = tableView.sortDescriptors.first,
-                  let key = descriptor.key,
-                  let sort = columnsByID[key]?.sort
-            else { return }
-            sortOrder.wrappedValue = [sort.comparator(descriptor.ascending ? .forward : .reverse)]
-        }
-
-        @objc func performPrimaryAction(_ sender: NSTableView) {
-            let row = sender.clickedRow
-            guard let primaryAction = parent.primaryAction, row >= 0, row < rows.count else { return }
-            primaryAction(rows[row])
-        }
-
-        // MARK: NSMenuDelegate
-
-        func menuNeedsUpdate(_ menu: NSMenu) {
-            menu.removeAllItems()
-            menuActions = []
-            guard let table, let contextMenu = parent.contextMenu,
-                  table.clickedRow >= 0, table.clickedRow < rows.count
-            else { return }
-            for item in contextMenu(rows[table.clickedRow]) {
-                let menuItem = NSMenuItem(title: item.title, action: #selector(performMenuItem(_:)), keyEquivalent: "")
-                menuItem.target = self
-                menuItem.tag = menuActions.count
-                menuActions.append(item.action)
-                menu.addItem(menuItem)
-            }
-        }
-
-        @objc private func performMenuItem(_ sender: NSMenuItem) {
-            guard menuActions.indices.contains(sender.tag) else { return }
-            menuActions[sender.tag]()
-        }
+    func menuItems(for row: Int) -> [NativeTableMenuItem] {
+        guard let contextMenu = parent.contextMenu, row >= 0, row < rows.count else { return [] }
+        return contextMenu(rows[row])
     }
 }
 
