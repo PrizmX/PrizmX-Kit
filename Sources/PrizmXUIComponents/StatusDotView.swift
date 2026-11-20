@@ -1,13 +1,12 @@
 import SwiftUI
 import PrizmXServices
 
-/// Traffic-light status indicator with a pulse (connected) or breathing
-/// (connecting) animation.
+/// Traffic-light status indicator with a time-driven pulse (connected) or
+/// breathing (connecting) animation. Driven by `TimelineView` so parent
+/// 1 Hz updates never reset or jump the animation state.
 public struct StatusDotView: View {
     public var status: VPNStatus
     public var size: CGFloat
-
-    @State private var animationPhase = false
 
     public init(status: VPNStatus, size: CGFloat = 10) {
         self.status = status
@@ -15,24 +14,25 @@ public struct StatusDotView: View {
     }
 
     public var body: some View {
-        ZStack {
-            if status.signal != .bad {
-                Circle()
-                    .stroke(color.opacity(0.45), lineWidth: 2)
-                    .frame(width: size, height: size)
-                    .scaleEffect(animationPhase ? 2.2 : 1)
-                    .opacity(animationPhase ? 0 : 0.85)
-            }
+        TimelineView(.animation(paused: status.signal == .bad)) { context in
+            let metrics = Self.frameMetrics(for: status, at: context.date)
+            ZStack {
+                if status.signal != .bad {
+                    Circle()
+                        .stroke(color.opacity(0.45), lineWidth: 2)
+                        .frame(width: size, height: size)
+                        .scaleEffect(metrics.ringScale)
+                        .opacity(metrics.ringOpacity)
+                }
 
-            Circle()
-                .fill(color)
-                .frame(width: size, height: size)
-                .opacity(status.signal == .pending && animationPhase ? 0.55 : 1)
+                Circle()
+                    .fill(color)
+                    .frame(width: size, height: size)
+                    .opacity(metrics.dotOpacity)
+            }
+            .frame(width: size * 2.4, height: size * 2.4)
         }
-        .frame(width: size * 2.4, height: size * 2.4)
         .accessibilityLabel(Text(status.rawValue))
-        .onAppear { restartAnimation() }
-        .onChange(of: status) { _, _ in restartAnimation() }
     }
 
     private var color: Color {
@@ -46,19 +46,26 @@ public struct StatusDotView: View {
         }
     }
 
-    private func restartAnimation() {
-        animationPhase = false
+    private static func frameMetrics(
+        for status: VPNStatus,
+        at date: Date
+    ) -> (ringScale: CGFloat, ringOpacity: Double, dotOpacity: Double) {
+        let now = date.timeIntervalSinceReferenceDate
         switch status.signal {
         case .good:
-            withAnimation(.easeOut(duration: 1.2).repeatForever(autoreverses: false)) {
-                animationPhase = true
-            }
+            let period = 1.2
+            let t = now.truncatingRemainder(dividingBy: period) / period
+            let eased = 1 - pow(1 - t, 2)
+            return (1 + 1.2 * eased, 0.85 * (1 - eased), 1)
         case .pending:
-            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                animationPhase = true
-            }
+            let period = 1.8
+            let half = period / 2
+            let phase = now.truncatingRemainder(dividingBy: period)
+            let linear = phase <= half ? (phase / half) : (2 - phase / half)
+            let eased = 0.5 - 0.5 * cos(.pi * linear)
+            return (1 + 1.2 * eased, 0.85 * (1 - eased), 1 - 0.45 * eased)
         case .bad:
-            break
+            return (1, 0, 1)
         }
     }
 }

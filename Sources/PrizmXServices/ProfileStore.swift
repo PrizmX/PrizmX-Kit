@@ -165,6 +165,33 @@ public final class ProfileStore {
         try persist()
     }
 
+    /// Validates and saves edits to an existing profile's metadata and raw config.
+    @discardableResult
+    public func updateContent(
+        id: UUID,
+        name: String,
+        subscriptionURL: URL? = nil,
+        rawConfig: String
+    ) throws -> [ConfigWarning] {
+        guard let index = profiles.firstIndex(where: { $0.id == id }) else {
+            throw ProfileStoreError.unknownProfile
+        }
+        let parsed = try ConfigAdapter.parseWithWarnings(rawString: rawConfig)
+        var next = profiles[index]
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedName.isEmpty {
+            next.name = trimmedName
+        }
+        next.subscriptionURL = subscriptionURL
+        next.rawConfig = rawConfig
+        next.format = ProxyProfile.inferredFormat(for: rawConfig)
+        next.lastUpdated = Date()
+        profiles[index] = next
+        try persist(configFor: next)
+        rebuildCatalogIfNeeded()
+        return parsed.warnings
+    }
+
     public func selectActiveProfile(id: UUID) throws {
         guard profiles.contains(where: { $0.id == id }) else {
             throw ProfileStoreError.unknownProfile

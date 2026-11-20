@@ -28,21 +28,47 @@ final class TunnelXPCClient: @unchecked Sendable {
         return data.flatMap { try? JSONDecoder().decode([LoopbackClient].self, from: $0) }
     }
 
+    private static let requestTimeout: Duration = .seconds(2)
+
     private func request(
         _ call: (any TunnelXPCService, @escaping (Data?) -> Void) -> Void
     ) async -> Data? {
         let connection = currentConnection()
+        let identity = ObjectIdentifier(connection)
         return await withCheckedContinuation { continuation in
             let once = OnceResume(continuation)
-            let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
+            let timeoutTask = Task { [weak self] in
+                try? await Task.sleep(for: Self.requestTimeout)
+                guard !Task.isCancelled else { return }
+                self?.dropConnection(identity: identity)
+                once.resume(nil)
+            }
+            once.armTimeout(task: timeoutTask)
+
+            let proxy = connection.remoteObjectProxyWithErrorHandler { [weak self] _ in
+                self?.dropConnection(identity: identity)
                 once.resume(nil)
             } as? any TunnelXPCService
             guard let proxy else {
+                dropConnection(identity: identity)
                 once.resume(nil)
                 return
             }
             call(proxy) { once.resume($0) }
         }
+    }
+
+    private func dropConnection(identity: ObjectIdentifier) {
+        lock.lock()
+        let target: NSXPCConnection?
+        if let current = connection, ObjectIdentifier(current) == identity {
+            target = current
+            connection = nil
+        } else {
+            target = nil
+        }
+        lock.unlock()
+        target?.invalidate()
     }
 
     private func currentConnection() -> NSXPCConnection {
@@ -85,16 +111,30 @@ final class TunnelXPCClient: @unchecked Sendable {
     private final class OnceResume: @unchecked Sendable {
         private let lock = NSLock()
         private var continuation: CheckedContinuation<Data?, Never>?
+        private var timeoutTask: Task<Void, Never>?
 
         init(_ continuation: CheckedContinuation<Data?, Never>) {
             self.continuation = continuation
+        }
+
+        func armTimeout(task: Task<Void, Never>) {
+            lock.lock()
+            if continuation == nil {
+                task.cancel()
+            } else {
+                timeoutTask = task
+            }
+            lock.unlock()
         }
 
         func resume(_ value: Data?) {
             lock.lock()
             let pending = continuation
             continuation = nil
+            let task = timeoutTask
+            timeoutTask = nil
             lock.unlock()
+            task?.cancel()
             pending?.resume(returning: value)
         }
     }

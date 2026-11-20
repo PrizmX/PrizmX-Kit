@@ -116,9 +116,6 @@ public struct TrafficWaveform: View {
 
     private var splitBarChart: some View {
         Chart {
-            RuleMark(y: .value("Zero", 0))
-                .foregroundStyle(Color.secondary.opacity(0.22))
-                .lineStyle(StrokeStyle(lineWidth: 0.5))
             ForEach(plotSamples) { sample in
                 AreaMark(
                     x: .value("Tick", sample.index),
@@ -129,15 +126,15 @@ public struct TrafficWaveform: View {
                 .foregroundStyle(
                     sample.lane.areaFill(mirroredBelow: sample.lane == .download)
                 )
-                .interpolationMethod(.linear)
+                .interpolationMethod(.monotone)
                 LineMark(
                     x: .value("Tick", sample.index),
                     y: .value("Rate", sample.rate),
                     series: .value("Lane", sample.lane.plotKey)
                 )
                 .foregroundStyle(sample.lane.strokeColor)
-                .interpolationMethod(.linear)
-                .lineStyle(StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round))
+                .interpolationMethod(.monotone)
+                .lineStyle(StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
             }
         }
     }
@@ -147,7 +144,7 @@ public struct TrafficWaveform: View {
             ForEach(plotSamples) { sample in
                 if showsArea {
                     AreaMark(
-                        x: .value("Time", sample.timestamp),
+                        x: .value("Tick", sample.index),
                         yStart: .value("Base", domainMin),
                         yEnd: .value("Rate", sample.rate),
                         series: .value("Lane", sample.lane.plotKey)
@@ -156,7 +153,7 @@ public struct TrafficWaveform: View {
                     .interpolationMethod(interpolation)
                 }
                 LineMark(
-                    x: .value("Time", sample.timestamp),
+                    x: .value("Tick", sample.index),
                     y: .value("Rate", sample.rate),
                     series: .value("Lane", sample.lane.plotKey)
                 )
@@ -178,17 +175,20 @@ public struct TrafficWaveform: View {
         var lane: TrafficWaveformSeries
     }
 
-    /// Split samples are fractions of their lane's ceiling (see `plotMax`).
-    /// Below 6 % of it a lane is held at that floor so idle stays visible.
-    /// No per-sample dimming: Charts styles a whole series from its first
-    /// mark, so one idle oldest sample would dim the entire lane.
+    /// Split samples map into [baseline, 1] where `baseline` equals half the
+    /// 1.4pt stroke width (~0.7pt in the 64pt plot height), so idle upload and
+    /// download lines touch edge-to-edge along y = 0 without overlapping or
+    /// leaving a gap (matching Activity Monitor).
     private var plotSamples: [PlotSample] {
-        series.plottedLanes.flatMap { lane in
+        let splitBaseline = 0.022
+        return series.plottedLanes.flatMap { lane in
+            let rawValues = points.map { lane.rate(in: $0) }
+            let smoothed = Self.smooth(rawValues)
             let ceiling = splitAxis ? splitCeiling(lane) : plotMax
-            let floor = ceiling * 0.06
             return points.enumerated().map { index, point in
-                let raw = lane.rate(in: point)
-                let magnitude = splitAxis ? max(raw, floor) / ceiling : raw
+                let value = smoothed[index]
+                let normalized = min(max(value / ceiling, 0), 1)
+                let magnitude = splitAxis ? (splitBaseline + (1 - splitBaseline) * normalized) : value
                 let signed = (splitAxis && lane == .download) ? -magnitude : magnitude
                 return PlotSample(
                     pointID: point.id,
@@ -201,9 +201,23 @@ public struct TrafficWaveform: View {
         }
     }
 
-    /// Catmull-Rom on a flat zero series fabricates a bulge; keep idle linear.
+    /// Light 3-point weighted smoothing (0.2 / 0.6 / 0.2) for visual display
+    /// only so 1-second traffic spikes render as gentle rounded hills instead
+    /// of jagged needles, without altering exact numeric speed readouts.
+    private static func smooth(_ values: [Double]) -> [Double] {
+        guard values.count >= 3 else { return values }
+        var out = values
+        for i in 1..<(values.count - 1) {
+            out[i] = values[i - 1] * 0.2 + values[i] * 0.6 + values[i + 1] * 0.2
+        }
+        out[values.count - 1] = values[values.count - 2] * 0.25 + values[values.count - 1] * 0.75
+        return out
+    }
+
+    /// Monotone cubic interpolation stays smooth and rounded without Catmull-Rom
+    /// overshoot/bulges on idle zero baselines.
     private var interpolation: InterpolationMethod {
-        series.peak(in: points) < 1 ? .linear : .catmullRom
+        series.peak(in: points) < 1 ? .linear : .monotone
     }
 
     /// Split lanes are normalized to their own ceiling, so the plot spans ±1.

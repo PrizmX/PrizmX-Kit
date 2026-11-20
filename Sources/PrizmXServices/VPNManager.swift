@@ -58,6 +58,12 @@ public final class VPNManager {
     public let isMock: Bool
 
     public private(set) var status: VPNStatus = .invalid
+    /// Persisted preference for NEVPNManager On-Demand auto-reconnect.
+    public private(set) var alwaysOnEnabled: Bool = UserDefaults.standard.bool(forKey: "prizmx.vpn.alwaysOn")
+    /// System-tracked start date of the active tunnel session.
+    public var connectedDate: Date? {
+        isMock ? nil : tunnelManager?.connection.connectedDate
+    }
     public private(set) var uploadBytesPerSecond: Double = 0
     public private(set) var downloadBytesPerSecond: Double = 0
     public private(set) var activeConnections: Int = 0
@@ -129,6 +135,10 @@ public final class VPNManager {
     @ObservationIgnored
     private var lastStart: StartArguments?
     @ObservationIgnored
+    private var xpcBackoffUntil: ContinuousClock.Instant?
+    @ObservationIgnored
+    private var loggedXPCFallback = false
+    @ObservationIgnored
     private var mockUplinkBytes: UInt64 = 0
     @ObservationIgnored
     private var mockDownlinkBytes: UInt64 = 0
@@ -188,6 +198,37 @@ public final class VPNManager {
         } catch {
             lastError = error.localizedDescription
             status = .error
+        }
+    }
+
+    /// Toggles system On-Demand (Always On). While connected, applies the
+    /// preference immediately; manual Disconnect temporarily disables On-Demand
+    /// so iOS/macOS will not reconnect behind the user's back.
+    public func setAlwaysOn(_ enabled: Bool) async {
+        alwaysOnEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "prizmx.vpn.alwaysOn")
+        guard !isMock else { return }
+        if tunnelManager == nil { await loadManager() }
+        guard let manager = tunnelManager, manager.protocolConfiguration != nil else { return }
+        do {
+            try await manager.loadFromPreferences()
+            Self.applyOnDemand(enabled && status.isConnectedOrTransitioningOn, to: manager)
+            try await manager.saveToPreferences()
+            tunnelManager = manager
+        } catch {
+            TunnelLog.write(.warn, "always-on update failed: \(error.localizedDescription)")
+        }
+    }
+
+    private static func applyOnDemand(_ active: Bool, to manager: NETunnelProviderManager) {
+        if active {
+            let rule = NEOnDemandRuleConnect()
+            rule.interfaceTypeMatch = .any
+            manager.onDemandRules = [rule]
+            manager.isOnDemandEnabled = true
+        } else {
+            manager.isOnDemandEnabled = false
+            manager.onDemandRules = nil
         }
     }
 
@@ -441,6 +482,7 @@ public final class VPNManager {
                 try await manager.loadFromPreferences()
             }
             manager.isEnabled = true
+            Self.applyOnDemand(alwaysOnEnabled, to: manager)
             try await manager.saveToPreferences()
             let session = try await Self.reloadSession(
                 matching: configuration.providerBundleIdentifier
@@ -503,7 +545,16 @@ public final class VPNManager {
         reconnectTask = nil
         reconnectAttempts = 0
         if !isMock {
-            tunnelManager?.connection.stopVPNTunnel()
+            if let manager = tunnelManager, manager.isOnDemandEnabled {
+                Self.applyOnDemand(false, to: manager)
+                Task { @MainActor [weak self] in
+                    guard let current = self?.tunnelManager else { return }
+                    try? await current.saveToPreferences()
+                    current.connection.stopVPNTunnel()
+                }
+            } else {
+                tunnelManager?.connection.stopVPNTunnel()
+            }
             TunnelLog.write(.info, "vpn stop requested")
         }
         if isMock {
@@ -601,42 +652,71 @@ public final class VPNManager {
         guard status == .connected else {
             return await Self.offMain { provider?() ?? .zero }
         }
+        let local = await Self.offMain { provider?() ?? .zero }
         if configuration.metricsChannel == .xpc {
-            let local = await Self.offMain { provider?() ?? .zero }
             #if os(macOS)
-            if let remote = await TunnelXPCClient.shared.fetchMetrics() {
+            let now = ContinuousClock.now
+            let shouldTryXPC = xpcBackoffUntil.map { now >= $0 } ?? true
+            if shouldTryXPC {
+                if let remote = await TunnelXPCClient.shared.fetchMetrics() {
+                    xpcBackoffUntil = nil
+                    if loggedXPCFallback {
+                        loggedXPCFallback = false
+                        TunnelLog.write(.info, "xpc: metrics channel recovered")
+                    }
+                    return remote.merging(local)
+                }
+                // Back off XPC probes for 15s to avoid spamming launchd every second,
+                // and immediately fall back to providerMessage so TUN stats never drop to 0.
+                xpcBackoffUntil = now + .seconds(15)
+            }
+            if let session = tunnelManager?.connection as? NETunnelProviderSession,
+               let remote = await fetchProviderMetrics(over: session) {
+                if !loggedXPCFallback {
+                    loggedXPCFallback = true
+                    TunnelLog.write(.info, "metrics: using providerMessage fallback while xpc is unreachable")
+                }
                 return remote.merging(local)
             }
             #endif
             return local
         }
-        let local = await Self.offMain { provider?() ?? .zero }
         guard let session = tunnelManager?.connection as? NETunnelProviderSession else {
             return local
         }
-
-        let payload: Data
-        do {
-            payload = try TunnelIPC.encode(.init(method: .fetchMetrics))
-        } catch {
-            lastError = error.localizedDescription
-            return local
+        if let remote = await fetchProviderMetrics(over: session) {
+            return remote.merging(local)
         }
+        return local
+    }
 
+    /// Timeout-bounded `sendProviderMessage(.fetchMetrics)` so a stalled
+    /// provider never hangs the 1s metrics loop.
+    private func fetchProviderMetrics(
+        over session: NETunnelProviderSession,
+        timeout: Duration = .seconds(2)
+    ) async -> TrafficSnapshot? {
+        guard let payload = try? TunnelIPC.encode(.init(method: .fetchMetrics)) else {
+            return nil
+        }
         do {
             let responseData: Data? = try await withCheckedThrowingContinuation { continuation in
+                let once = ReplyOnce(continuation)
                 do {
-                    try session.sendProviderMessage(payload) { data in
-                        continuation.resume(returning: data)
+                    try session.sendProviderMessage(payload) { @Sendable data in
+                        once.resume { data }
                     }
                 } catch {
-                    continuation.resume(throwing: error)
+                    once.resume { throw error }
+                }
+                Task {
+                    try? await Task.sleep(for: timeout)
+                    once.resume { throw VPNError.reloadFailed("metrics timed out") }
                 }
             }
-            return try await Self.offMain { try TunnelIPC.metrics(from: responseData).merging(local) }
+            return try await Self.offMain { try TunnelIPC.metrics(from: responseData) }
         } catch {
-            // Provider may not have registered IPC yet; keep mixed-port alive.
-            return local
+            return nil
         }
     }
 
@@ -723,6 +803,7 @@ extension VPNManager {
         status = next
         if next == .connected {
             reconnectAttempts = 0
+            xpcBackoffUntil = nil
             if !wantsConnection {
                 // A stale `.connected` trailing our own stopVPN is not an
                 // external start — suppress it or the UI toggle flashes on.

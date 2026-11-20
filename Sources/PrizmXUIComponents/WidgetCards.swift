@@ -491,13 +491,13 @@ public struct OutboundCard<PickerContent: View>: View {
 public struct TakeoverCard: View {
     public var headline: String
     public var startedAt: Date?
-    public var proxyIsOn: Binding<Bool>
+    public var proxyIsOn: Binding<Bool>?
     public var tunIsOn: Binding<Bool>
 
     public init(
         headline: String,
         startedAt: Date? = nil,
-        proxyIsOn: Binding<Bool>,
+        proxyIsOn: Binding<Bool>? = nil,
         tunIsOn: Binding<Bool>
     ) {
         self.headline = headline
@@ -521,13 +521,15 @@ public struct TakeoverCard: View {
                     WidgetSplitValue(value: headline)
                     Spacer(minLength: 0)
                     HStack(alignment: .top, spacing: 12) {
-                        WidgetSwitchRow(
-                            title: "System Proxy",
-                            subtitle: "HTTP & HTTPS via mixed-port",
-                            systemImage: "globe",
-                            isOn: proxyIsOn,
-                            compact: compact
-                        )
+                        if let proxyIsOn {
+                            WidgetSwitchRow(
+                                title: "System Proxy",
+                                subtitle: "HTTP & HTTPS via mixed-port",
+                                systemImage: "globe",
+                                isOn: proxyIsOn,
+                                compact: compact
+                            )
+                        }
                         WidgetSwitchRow(
                             title: "TUN",
                             subtitle: "All traffic via utun",

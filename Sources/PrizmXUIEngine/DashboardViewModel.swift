@@ -37,6 +37,28 @@ public final class DashboardViewModel {
         followMetricsPolling()
     }
 
+    private func syncHistory(from metrics: VPNMetrics) {
+        if !metrics.rateHistory.isEmpty {
+            let points = metrics.rateHistory.enumerated().map { idx, sample in
+                SpeedPoint(
+                    id: idx,
+                    timestamp: sample.timestamp,
+                    uploadBytesPerSecond: sample.uploadBytesPerSecond,
+                    downloadBytesPerSecond: sample.downloadBytesPerSecond
+                )
+            }
+            history = SpeedHistoryBuffer(capacity: history.capacity, points: points)
+        } else {
+            history.append(
+                uploadBytesPerSecond: vpn.uploadBytesPerSecond,
+                downloadBytesPerSecond: vpn.downloadBytesPerSecond
+            )
+        }
+        if publishesSpeedHistory {
+            speedHistory = paddedHistory
+        }
+    }
+
     deinit {
         historyTask?.cancel()
     }
@@ -146,17 +168,14 @@ public final class DashboardViewModel {
 
     private func startHistorySampling() {
         guard historyTask == nil else { return }
+        if !vpn.lastMetrics.rateHistory.isEmpty {
+            syncHistory(from: vpn.lastMetrics)
+        }
         historyTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: VPNManager.metricsPollInterval)
                 guard let self, !Task.isCancelled else { return }
-                self.history.append(
-                    uploadBytesPerSecond: self.vpn.uploadBytesPerSecond,
-                    downloadBytesPerSecond: self.vpn.downloadBytesPerSecond
-                )
-                if self.publishesSpeedHistory {
-                    self.speedHistory = self.paddedHistory
-                }
+                self.syncHistory(from: self.vpn.lastMetrics)
             }
         }
     }

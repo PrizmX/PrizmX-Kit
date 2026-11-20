@@ -24,6 +24,7 @@ let package = Package(
         .library(name: "PrizmXServices", targets: ["PrizmXServices"]),
         .library(name: "PrizmXUIEngine", targets: ["PrizmXUIEngine"]),
         .library(name: "PrizmXUIComponents", targets: ["PrizmXUIComponents"]),
+        .library(name: "PrizmXMacUI", targets: ["PrizmXMacUI"]),
         // Linked by the app's privileged helper tool; no other dependencies.
         .library(name: "PrizmXProxyHelper", targets: ["PrizmXProxyHelper"]),
     ],
@@ -57,6 +58,21 @@ let package = Package(
         .target(
             name: "PrizmXUIComponents",
             dependencies: ["PrizmXUIEngine", "PrizmXServices"]
+        ),
+        .target(
+            name: "PrizmXMacUI",
+            dependencies: [
+                "PrizmXServices",
+                "PrizmXUIEngine",
+                "PrizmXUIComponents",
+                .product(name: "PrizmXConfig", package: "PrizmX-Foundation"),
+                .product(name: "PrizmXNodes", package: "PrizmX-Foundation"),
+                .product(name: "PrizmXProtocols", package: "PrizmX-Foundation"),
+            ],
+            swiftSettings: [
+                .defaultIsolation(MainActor.self),
+                .swiftLanguageMode(.v5),
+            ]
         ),
         .testTarget(
             name: "PrizmXServicesTests",

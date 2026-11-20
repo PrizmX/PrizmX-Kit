@@ -42,11 +42,13 @@ public struct PolicyMember: Identifiable, Sendable, Hashable {
 public struct PolicyGroupSection: Identifiable, Sendable, Hashable {
     public var id: String
     public var title: String
+    public var iconURL: URL?
     public var members: [PolicyMember]
 
-    public init(id: String, title: String, members: [PolicyMember]) {
+    public init(id: String, title: String, iconURL: URL? = nil, members: [PolicyMember]) {
         self.id = id
         self.title = title
+        self.iconURL = iconURL
         self.members = members
     }
 }
@@ -112,6 +114,7 @@ public final class NodeListViewModel {
             PolicyGroupSection(
                 id: group.name,
                 title: group.name,
+                iconURL: group.iconURL,
                 members: group.nodeIDs.map { Self.policyMember($0, manager: manager) }
             )
         }
