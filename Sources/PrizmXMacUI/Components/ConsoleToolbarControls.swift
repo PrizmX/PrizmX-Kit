@@ -1,5 +1,23 @@
 import AppKit
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
+
+/// Opens a text-based file (`.sgmodule`, `.stoverride`, `.js`, etc.) in its
+/// registered app, falling back to the system default plain-text editor when
+/// macOS has no handler for custom extensions.
+func openTextFileInDefaultEditor(_ url: URL) {
+    let workspace = NSWorkspace.shared
+    if workspace.urlForApplication(toOpen: url) != nil {
+        workspace.open(url)
+        return
+    }
+    if let textApp = workspace.urlForApplication(toOpen: UTType.plainText) {
+        workspace.open([url], withApplicationAt: textApp, configuration: NSWorkspace.OpenConfiguration())
+        return
+    }
+    workspace.activateFileViewerSelecting([url])
+}
 import PrizmXUIEngine
 
 extension View {

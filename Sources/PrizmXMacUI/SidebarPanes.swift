@@ -42,7 +42,7 @@ struct RulesPane: View {
                 }
             }
         }
-        .navigationTitle("Rules \(rows.count)")
+        .navigationTitle("Rules - \(rows.count)")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 IconControlGroup {

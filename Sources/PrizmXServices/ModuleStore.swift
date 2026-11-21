@@ -1,6 +1,8 @@
+import CryptoKit
 import Foundation
 import Observation
 import PrizmXConfig
+import PrizmXScripts
 
 /// One installed Surge `.sgmodule` or Stash `.stoverride` module.
 public struct ModuleRecord: Sendable, Hashable, Codable, Identifiable, Equatable {
@@ -57,6 +59,8 @@ public final class ModuleStore {
     private var unreadableFile: StoreFileBackup.LoadError?
     @ObservationIgnored
     private var parsedCache: [UUID: ParsedModule] = [:]
+    @ObservationIgnored
+    private var scriptSourceCache: [URL: String] = [:]
 
     public let configuration: ProfileStore.Configuration
     public let storage: ProfileStore.StorageKind
@@ -121,12 +125,107 @@ public final class ModuleStore {
     public func moduleRuleSources() -> [String] {
         var names: [String] = []
         for record in modules where record.enabled {
-            let count = parsed(for: record).rules.count
+            let count = parsed(for: record).rawRules.count
             if count > 0 {
                 names.append(contentsOf: repeatElement(record.name, count: count))
             }
         }
         return names
+    }
+
+    public func moveUp(id: UUID) {
+        guard let idx = modules.firstIndex(where: { $0.id == id }), idx > 0 else { return }
+        modules.swapAt(idx, idx - 1)
+        try? persist()
+    }
+
+    public func moveDown(id: UUID) {
+        guard let idx = modules.firstIndex(where: { $0.id == id }), idx + 1 < modules.count else { return }
+        modules.swapAt(idx, idx + 1)
+        try? persist()
+    }
+
+    /// Downloads and caches non-MITM cron/event scripts referenced by enabled modules.
+    public func prefetchModuleScripts() async {
+        let urls = modules
+            .filter(\.enabled)
+            .flatMap { parsed(for: $0).scripts.map(\.scriptURL) }
+        for url in Set(urls) {
+            if cachedModuleScriptSource(for: url) != nil { continue }
+            if let fetched = try? await Self.fetchContent(from: url),
+               !fetched.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                storeModuleScriptSource(fetched, for: url)
+            }
+        }
+    }
+
+    /// Ready-to-run `ScriptRecord`s for all enabled modules' cron & event scripts
+    /// whose JS source has been cached.
+    public func enabledModuleScripts() -> [ScriptRecord] {
+        var records: [ScriptRecord] = []
+        for module in modules where module.enabled {
+            let parsedModule = parsed(for: module)
+            for script in parsedModule.scripts {
+                guard let source = cachedModuleScriptSource(for: script.scriptURL) else { continue }
+                let kind: ScriptRecord.Kind = script.kind == .cron ? .cron : .event
+                records.append(ScriptRecord(
+                    id: Self.stableScriptID(moduleID: module.id, scriptName: script.name),
+                    name: "\(module.name): \(script.name)",
+                    enabled: true,
+                    kind: kind,
+                    pattern: script.pattern,
+                    source: source,
+                    argument: script.argument,
+                    timeout: script.timeout,
+                    sourceURL: script.scriptURL
+                ))
+            }
+        }
+        return records
+    }
+
+    /// Test / pre-seed helper for module script source cache.
+    public func seedModuleScriptSource(_ source: String, for url: URL) {
+        storeModuleScriptSource(source, for: url)
+    }
+
+    private func cachedModuleScriptSource(for url: URL) -> String? {
+        if let hit = scriptSourceCache[url] { return hit }
+        guard storage == .disk else { return nil }
+        let file = cachedModuleScriptFileURL(for: url)
+        if let text = try? String(contentsOf: file, encoding: .utf8),
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            scriptSourceCache[url] = text
+            return text
+        }
+        return nil
+    }
+
+    private func storeModuleScriptSource(_ source: String, for url: URL) {
+        scriptSourceCache[url] = source
+        guard storage == .disk else { return }
+        let dir = modulesDirectoryURL.appendingPathComponent("scripts", isDirectory: true)
+        try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? Data(source.utf8).write(to: cachedModuleScriptFileURL(for: url), options: .atomic)
+    }
+
+    private func cachedModuleScriptFileURL(for url: URL) -> URL {
+        let digest = SHA256.hash(data: Data(url.absoluteString.utf8))
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        return modulesDirectoryURL
+            .appendingPathComponent("scripts", isDirectory: true)
+            .appendingPathComponent("\(hex).js", isDirectory: false)
+    }
+
+    private static func stableScriptID(moduleID: UUID, scriptName: String) -> UUID {
+        let digest = SHA256.hash(data: Data("\(moduleID.uuidString):\(scriptName)".utf8))
+        let bytes = Array(digest.prefix(16))
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
     }
 
     @discardableResult

@@ -55,6 +55,10 @@ public final class ScriptScheduler {
     @ObservationIgnored
     private let networkProvider: @MainActor () -> ScriptNetworkInfo
     @ObservationIgnored
+    private let moduleScriptsProvider: @MainActor () -> [ScriptRecord]
+    @ObservationIgnored
+    private let prizmxBridgeProvider: @MainActor () -> ScriptPrizmXBridge
+    @ObservationIgnored
     private let notificationHandler: ScriptNotificationHandler?
     @ObservationIgnored
     private let appVersion: String
@@ -70,6 +74,8 @@ public final class ScriptScheduler {
         persistentStore: any ScriptPersistentStorage = InMemoryScriptPersistentStore(),
         httpClient: @escaping ScriptHTTPHandler = ScriptEnvironmentContext.defaultHTTPClient,
         networkProvider: @escaping @MainActor () -> ScriptNetworkInfo = { ScriptNetworkInfo() },
+        moduleScriptsProvider: @escaping @MainActor () -> [ScriptRecord] = { [] },
+        prizmxBridgeProvider: @escaping @MainActor () -> ScriptPrizmXBridge = { .empty },
         notificationHandler: ScriptNotificationHandler? = nil,
         appVersion: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
     ) {
@@ -77,6 +83,8 @@ public final class ScriptScheduler {
         self.persistentStore = persistentStore
         self.httpClient = httpClient
         self.networkProvider = networkProvider
+        self.moduleScriptsProvider = moduleScriptsProvider
+        self.prizmxBridgeProvider = prizmxBridgeProvider
         self.notificationHandler = notificationHandler
         self.appVersion = appVersion
         self.engine = ScriptEngine(environment: ScriptEnvironmentContext(
@@ -124,7 +132,8 @@ public final class ScriptScheduler {
             persistentStore: persistentStore,
             notificationHandler: notificationHandler,
             network: networkProvider(),
-            version: appVersion
+            version: appVersion,
+            prizmx: prizmxBridgeProvider()
         )
         var request = script.request
         request.source = store.resolvedSource(for: script)
@@ -176,7 +185,7 @@ public final class ScriptScheduler {
         guard key != lastCronMinuteKey else { return }
         lastCronMinuteKey = key
 
-        let candidates = store.scripts.filter { $0.enabled && $0.kind == .cron }
+        let candidates = (store.scripts + moduleScriptsProvider()).filter { $0.enabled && $0.kind == .cron }
         for script in candidates {
             guard let schedule = try? CronSchedule.parse(script.pattern),
                   schedule.matches(date, calendar: calendar, ignoreSeconds: true)
@@ -200,7 +209,7 @@ public final class ScriptScheduler {
 
     /// Immediate trigger used by `handleNetworkChanged` and unit tests.
     public func triggerNetworkChangedEventNow() async {
-        let candidates = store.scripts.filter { script in
+        let candidates = (store.scripts + moduleScriptsProvider()).filter { script in
             guard script.enabled, script.kind == .event else { return false }
             let trimmed = script.pattern.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             return trimmed.isEmpty || trimmed == "network-changed"

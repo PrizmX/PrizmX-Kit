@@ -22,28 +22,28 @@ struct ModulesPane: View {
                     title: "No Modules",
                     systemImage: SidebarItem.module.systemImage,
                     description: search.isEmpty
-                        ? (store.lastError ?? "Import a Surge .sgmodule or Stash .stoverride to overlay rules, hosts, and DNS filters without editing your subscription.")
+                        ? (store.lastError ?? "Import Surge .sgmodule or Stash .stoverride modules to overlay rules, hosts, DNS filters, and cron/event scripts. MITM and URL Rewrite sections require PrizmX Pro.")
                         : "No modules match this filter."
                 )
             } else {
                 Table(rows, selection: $selectedID) {
-                    TableColumn("On") { (module: ModuleRecord) in
-                        Toggle("", isOn: Binding(
-                            get: { module.enabled },
-                            set: { enabled in
-                                store.setEnabled(enabled, id: module.id)
-                                appModel.didChangeModules()
-                            }
-                        ))
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .controlSize(.mini)
+                    TableColumn("") { (module: ModuleRecord) in
+                        let isSelected = selectedID == module.id
+                        Image(systemName: module.sourceURL != nil ? "link.circle" : "shippingbox")
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(
+                                isSelected
+                                    ? (module.enabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                                    : (module.enabled ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.secondary.opacity(0.5)))
+                            )
+                            .frame(maxWidth: .infinity, alignment: .center)
                     }
-                    .width(42)
+                    .width(24)
 
                     TableColumn("Name") { (module: ModuleRecord) in
                         HStack(spacing: 6) {
                             Text(module.name)
+                                .fontWeight(module.enabled ? .semibold : .regular)
                                 .foregroundStyle(module.enabled ? .primary : .secondary)
                             if let category = module.category, !category.isEmpty {
                                 Text(category)
@@ -52,11 +52,6 @@ struct ModulesPane: View {
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 1)
                                     .background(Color.secondary.opacity(0.14), in: Capsule())
-                            }
-                            if module.sourceURL != nil {
-                                Image(systemName: "link")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
                             }
                         }
                     }
@@ -95,6 +90,17 @@ struct ModulesPane: View {
                         }
                         Button("Inspect…") { inspecting = module }
                         Divider()
+                        Button("Move Up") {
+                            store.moveUp(id: module.id)
+                            appModel.didChangeModules()
+                        }
+                        .disabled(store.modules.first?.id == module.id)
+                        Button("Move Down") {
+                            store.moveDown(id: module.id)
+                            appModel.didChangeModules()
+                        }
+                        .disabled(store.modules.last?.id == module.id)
+                        Divider()
                         if module.sourceURL != nil {
                             Button("Update from URL") {
                                 Task { await refreshRemote(id: module.id) }
@@ -112,7 +118,7 @@ struct ModulesPane: View {
                 }
             }
         }
-        .navigationTitle("Module \(rows.count)")
+        .navigationTitle("Modules - \(rows.count)")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 IconControlGroup {
@@ -131,13 +137,6 @@ struct ModulesPane: View {
                     .disabled(selectedID == nil)
                     .help("Delete module")
                 }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button("Reload Files", systemImage: "arrow.clockwise") {
-                    appModel.didChangeModules()
-                }
-                .labelStyle(.iconOnly)
-                .help("Re-read module files from disk and reload active overlay")
             }
             if #available(macOS 26.0, *) {
                 ToolbarSpacer(.fixed, placement: .primaryAction)
@@ -185,9 +184,10 @@ struct ModulesPane: View {
 
     private func contentSummary(_ parsed: ParsedModule) -> String {
         var parts: [String] = []
-        if !parsed.rules.isEmpty { parts.append("\(parsed.rules.count) rules") }
+        if !parsed.rawRules.isEmpty { parts.append("\(parsed.rawRules.count) rules") }
         if !parsed.hosts.isEmpty { parts.append("\(parsed.hosts.count) hosts") }
         if !parsed.fakeIPFilters.isEmpty { parts.append("\(parsed.fakeIPFilters.count) DNS filters") }
+        if !parsed.scripts.isEmpty { parts.append("\(parsed.scripts.count) scripts") }
         if parts.isEmpty {
             return parsed.skipped.isEmpty ? "Empty" : "Skipped (MITM only)"
         }
@@ -221,7 +221,7 @@ struct ModulesPane: View {
     private func openInEditor(_ module: ModuleRecord) {
         do {
             let url = try store.ensureModuleFile(for: module)
-            NSWorkspace.shared.open(url)
+            openTextFileInDefaultEditor(url)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -271,6 +271,12 @@ private struct ModuleDetailSheet: View {
                 Section("Overview") {
                     LabeledContent("Name", value: parsed.name)
                     LabeledContent("Format", value: parsed.format == .sgmodule ? "Surge (.sgmodule)" : "Stash (.stoverride)")
+                    if let author = parsed.author, !author.isEmpty {
+                        LabeledContent("Author", value: author)
+                    }
+                    if let homepage = parsed.homepage {
+                        Link("Homepage", destination: homepage)
+                    }
                     if !parsed.summary.isEmpty {
                         Text(parsed.summary)
                             .font(.callout)
@@ -298,9 +304,10 @@ private struct ModuleDetailSheet: View {
                 }
 
                 Section("Active Sections") {
-                    LabeledContent("Rules", value: "\(parsed.rules.count)")
+                    LabeledContent("Rules", value: "\(parsed.rawRules.count)")
                     LabeledContent("Hosts", value: "\(parsed.hosts.count)")
                     LabeledContent("FakeIP Filters", value: "\(parsed.fakeIPFilters.count)")
+                    LabeledContent("Cron / Event Scripts", value: "\(parsed.scripts.count)")
                 }
 
                 if !parsed.skipped.isEmpty {

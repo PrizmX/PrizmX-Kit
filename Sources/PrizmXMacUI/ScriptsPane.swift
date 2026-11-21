@@ -30,26 +30,34 @@ struct ScriptsPane: View {
                     )
                 } else {
                     Table(rows, selection: $selectedID) {
+                        TableColumn("") { (script: ScriptRecord) in
+                            let isEnabled = store.isEnabled(script)
+                            let isSelected = selectedID == script.id
+                            Image(systemName: scriptIcon(for: script))
+                                .symbolRenderingMode(.hierarchical)
+                                .foregroundStyle(
+                                    isSelected
+                                        ? (isEnabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                                        : (isEnabled ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.secondary.opacity(0.5)))
+                                )
+                                .frame(maxWidth: .infinity, alignment: .center)
+                        }
+                        .width(24)
+
                         TableColumn("Name") { (script: ScriptRecord) in
                             let isEnabled = store.isEnabled(script)
-                            Label {
-                                HStack(spacing: 6) {
-                                    Text(script.name)
-                                        .fontWeight(isEnabled ? .semibold : .regular)
-                                        .foregroundStyle(isEnabled ? .primary : .secondary)
-                                    if script.isBuiltIn {
-                                        Text("System")
-                                            .font(.caption2.weight(.medium))
-                                            .foregroundStyle(.secondary)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 1)
-                                            .background(Color.secondary.opacity(0.14), in: Capsule())
-                                    }
+                            HStack(spacing: 6) {
+                                Text(script.name)
+                                    .fontWeight(isEnabled ? .semibold : .regular)
+                                    .foregroundStyle(isEnabled ? .primary : .secondary)
+                                if script.isBuiltIn {
+                                    Text("System")
+                                        .font(.caption2.weight(.medium))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 1)
+                                        .background(Color.secondary.opacity(0.14), in: Capsule())
                                 }
-                            } icon: {
-                                Image(systemName: scriptIcon(for: script))
-                                    .symbolRenderingMode(.hierarchical)
-                                    .foregroundStyle(isEnabled ? Color.accentColor : Color.secondary)
                             }
                         }
 
@@ -114,7 +122,7 @@ struct ScriptsPane: View {
                 outputDrawer(summary)
             }
         }
-        .navigationTitle("Scripts \(rows.count)")
+        .navigationTitle("Scripts - \(rows.count)")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 IconControlGroup {
@@ -173,6 +181,8 @@ struct ScriptsPane: View {
     }
 
     private var store: ScriptStore { appModel.scripts }
+
+
     private var scheduler: ScriptScheduler { appModel.scriptScheduler }
 
     private var allScripts: [ScriptRecord] {
@@ -304,7 +314,7 @@ struct ScriptsPane: View {
     private func openInEditor(_ script: ScriptRecord) {
         do {
             let fileURL = try store.ensureSourceFile(for: script)
-            NSWorkspace.shared.open(fileURL)
+            openTextFileInDefaultEditor(fileURL)
         } catch {
             errorMessage = error.localizedDescription
         }

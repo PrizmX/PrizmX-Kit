@@ -3,7 +3,9 @@ import Foundation
 import Observation
 import SwiftUI
 import PrizmXConfig
+import PrizmXNodes
 import PrizmXProtocols
+import PrizmXRules
 import PrizmXScripts
 import PrizmXServices
 import PrizmXUIEngine
@@ -148,7 +150,7 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
         case .profiles: "Profiles"
         case .events: "Events"
         case .settings: "Settings"
-        case .module: "Module"
+        case .module: "Modules"
         case .scripts: "Scripts"
         }
     }
@@ -503,7 +505,8 @@ public final class AppModel {
             )
             let mixedPort = mixedPortRuntime
             dashboard.vpn.localMetricsProvider = { mixedPort.metrics() }
-            nodeList = NodeListViewModel(profiles: profiles)
+            let list = NodeListViewModel(profiles: profiles)
+            nodeList = list
             menuBarOnly = UserDefaults.standard.bool(forKey: DefaultsKey.menuBarOnly)
             systemProxyEnabled = configuration.capabilities.supportsSystemProxy && UserDefaults.standard.bool(forKey: DefaultsKey.systemProxyEnabled)
             // TUN starts off: it needs the system extension approved, which
@@ -545,6 +548,23 @@ public final class AppModel {
                         wifiSSID: link.kind == .wifi ? link.title : nil
                     )
                 },
+                moduleScriptsProvider: {
+                    moduleStore.enabledModuleScripts()
+                },
+                prizmxBridgeProvider: {
+                    Self.makePrizmXBridge(
+                        profiles: profiles,
+                        nodeList: list,
+                        selectHandler: { group, member in
+                            Task { @MainActor in
+                                try? profiles.setSelectedNode(id: member, groupName: group)
+                                try? profiles.nodeManager?.select(nodeID: member, inGroup: group)
+                                profiles.setPolicySelection(member, inGroup: group)
+                                await PrizmXServices.VPNManager.shared.notifySelectedNode(id: member, groupName: group)
+                            }
+                        }
+                    )
+                },
                 notificationHandler: { title, subtitle, body in
                     let parts = [title, subtitle, body].filter { !$0.isEmpty }.joined(separator: " — ")
                     TunnelLog.write(.info, "script notification: \(parts)")
@@ -562,6 +582,7 @@ public final class AppModel {
             trackTunnelEgress()
             trackAnalyticsProxyState()
             scriptScheduler.start()
+            Task { await modules.prefetchModuleScripts() }
             networkLink.onChange = { [weak self] in
                 self?.scheduleEgressRefresh()
                 self?.scriptScheduler.handleNetworkChanged()
@@ -1171,9 +1192,88 @@ public final class AppModel {
             : "Could not download databases. Check network connectivity."
     }
 
+    private static func makePrizmXBridge(
+        profiles: ProfileStore,
+        nodeList: NodeListViewModel,
+        selectHandler: @escaping @Sendable (_ group: String, _ member: String) -> Void
+    ) -> ScriptPrizmXBridge {
+        let rulesSnapshot = profiles.rules
+        let groupsSnapshot = profiles.nodeManager?.groups ?? []
+        let selectionsSnapshot = profiles.policySelections
+        let liveSelections = nodeList.liveGroupSelections
+        let selectableMap: [String: Set<String>] = Dictionary(
+            uniqueKeysWithValues: groupsSnapshot
+                .filter { $0.mode == .select }
+                .map { ($0.name, Set($0.nodeIDs)) }
+        )
+        let summaries: [ScriptPolicySummary] = groupsSnapshot.map { group in
+            let picked = liveSelections[group.name] ?? selectionsSnapshot[group.name] ?? group.selectedNodeID ?? group.nodeIDs.first
+            return ScriptPolicySummary(
+                name: group.name,
+                mode: group.mode.clashType,
+                selected: picked,
+                members: group.nodeIDs
+            )
+        }
+        let summaryByName = Dictionary(uniqueKeysWithValues: summaries.map { ($0.name, $0) })
+        let vpnStatus = PrizmXServices.VPNManager.shared.status.rawValue
+        let modeRaw = OutboundModeStore.load().mode.rawValue
+
+        return ScriptPrizmXBridge(
+            routeTest: { host, port in
+                let router = Router(rules: rulesSnapshot, default: .direct)
+                let endpoint: Endpoint
+                let p = UInt16(clamping: port)
+                if let v4 = IPv4Address(parsing: host) {
+                    endpoint = Endpoint(host: .ipv4(v4), port: p)
+                } else if let v6 = IPv6Address(parsing: host) {
+                    endpoint = Endpoint(host: .ipv6(v6), port: p)
+                } else {
+                    endpoint = Endpoint(domain: host, port: p)
+                }
+                let result = router.matchResult(endpoint: endpoint)
+                let policyName: String
+                switch result.policy {
+                case .direct: policyName = "DIRECT"
+                case .reject: policyName = "REJECT"
+                case .proxy(targetGroup: let name): policyName = name
+                }
+                var resolved = policyName
+                var visited = Set<String>()
+                for _ in 0..<8 {
+                    guard visited.insert(resolved).inserted,
+                          let group = summaryByName[resolved],
+                          let next = group.selected
+                    else { break }
+                    resolved = next
+                }
+                return ScriptRouteMatch(
+                    host: host,
+                    port: Int(p),
+                    rule: result.rule?.inspectorLabel ?? "MATCH,\(policyName)",
+                    policy: policyName,
+                    resolvedNode: resolved
+                )
+            },
+            policies: { summaries },
+            selectPolicy: { group, member in
+                guard let allowed = selectableMap[group], allowed.contains(member) else { return false }
+                selectHandler(group, member)
+                return true
+            },
+            egress: {
+                [
+                    "mode": modeRaw,
+                    "status": vpnStatus,
+                ]
+            }
+        )
+    }
+
     func didChangeModules() {
         modules.reloadFromDiskFiles()
         dashboard.profiles.applyModuleOverlay(modules.combinedOverlay)
+        Task { await modules.prefetchModuleScripts() }
         if tunModeEnabled || systemProxyEnabled || allowLANEnabled {
             scheduleReload(reason: "modules updated")
         }
